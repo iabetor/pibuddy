@@ -174,6 +174,12 @@ func setDefaults(cfg *Config) {
 		} else {
 			cfg.Tools.DataDir = "./.pibuddy-data"
 		}
+	} else if strings.HasPrefix(cfg.Tools.DataDir, "~/") {
+		// Go 不会自动展开 ~，需要手动替换为用户主目录
+		home, _ := os.UserHomeDir()
+		if home != "" {
+			cfg.Tools.DataDir = home + cfg.Tools.DataDir[1:]
+		}
 	}
 
 	// 去除 API Key 两端可能的空白（环境变量展开后常见）
