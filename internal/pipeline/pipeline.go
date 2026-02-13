@@ -95,6 +95,7 @@ func New(cfg *config.Config) (*Pipeline, error) {
 			SecretKey: cfg.TTS.Tencent.SecretKey,
 			VoiceType: cfg.TTS.Tencent.VoiceType,
 			Region:    cfg.TTS.Tencent.Region,
+			Speed:     cfg.TTS.Tencent.Speed,
 		})
 		if err != nil {
 			p.Close()
@@ -279,6 +280,9 @@ func (p *Pipeline) speakText(ctx context.Context, text string) {
 	samples, _, err := p.ttsEngine.Synthesize(ctx, text)
 	if err != nil {
 		log.Printf("[pipeline] TTS 合成失败: %v", err)
+		return
+	}
+	if len(samples) == 0 {
 		return
 	}
 

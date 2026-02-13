@@ -22,7 +22,7 @@ llm:
   api_url: "https://api.deepseek.com/v1"
   api_key: "${PIBUDDY_LLM_API_KEY}"
   model: "deepseek-chat"
-  system_prompt: "你是小派，一个智能家庭助手。请用简洁友好的中文回答。"
+  system_prompt: "你是小派，一个智能家庭助手。请用简洁友好的中文回答。不要使用emoji表情符号。"
   max_history: 10
   max_tokens: 500
 
@@ -31,8 +31,9 @@ tts:
   tencent:
     secret_id: "${PIBUDDY_TENCENT_SECRET_ID}"
     secret_key: "${PIBUDDY_TENCENT_SECRET_KEY}"
-    voice_type: 1001
+    voice_type: 502001
     region: "ap-guangzhou"
+    speed: -1.5
   edge:
     voice: "zh-CN-XiaoxiaoNeural"
   piper:

@@ -67,10 +67,11 @@ type TTSConfig struct {
 
 // TencentConfig 腾讯云 TTS 配置。
 type TencentConfig struct {
-	SecretID  string `yaml:"secret_id"`
-	SecretKey string `yaml:"secret_key"`
-	VoiceType int64  `yaml:"voice_type"`
-	Region    string `yaml:"region"`
+	SecretID  string  `yaml:"secret_id"`
+	SecretKey string  `yaml:"secret_key"`
+	VoiceType int64   `yaml:"voice_type"`
+	Region    string  `yaml:"region"`
+	Speed     float64 `yaml:"speed"`
 }
 
 // EdgeConfig Edge TTS 配置。
