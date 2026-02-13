@@ -14,9 +14,11 @@ func TestStateMachine_ValidTransitions(t *testing.T) {
 		from, to State
 	}{
 		{StateIdle, StateListening},
+		{StateIdle, StateSpeaking},          // 唤醒后播放提示语
 		{StateListening, StateProcessing},
 		{StateProcessing, StateSpeaking},
 		{StateSpeaking, StateIdle},
+		{StateSpeaking, StateListening},     // 播放提示语后进入监听
 	}
 
 	for _, tt := range tests {
@@ -38,12 +40,10 @@ func TestStateMachine_InvalidTransitions(t *testing.T) {
 		from, to State
 	}{
 		{StateIdle, StateProcessing},
-		{StateIdle, StateSpeaking},
 		{StateListening, StateSpeaking},
 		{StateListening, StateListening},
 		{StateProcessing, StateListening},
 		{StateProcessing, StateProcessing},
-		{StateSpeaking, StateListening},
 		{StateSpeaking, StateProcessing},
 		{StateSpeaking, StateSpeaking},
 	}

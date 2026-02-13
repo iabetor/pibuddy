@@ -10,14 +10,27 @@ import (
 
 // Config 是 PiBuddy 的顶层配置结构。
 type Config struct {
-	Audio AudioConfig `yaml:"audio"`
-	Wake  WakeConfig  `yaml:"wake"`
-	VAD   VADConfig   `yaml:"vad"`
-	ASR   ASRConfig   `yaml:"asr"`
-	LLM   LLMConfig   `yaml:"llm"`
-	TTS   TTSConfig   `yaml:"tts"`
-	Tools ToolsConfig `yaml:"tools"`
-	Log   LogConfig   `yaml:"log"`
+	Audio          AudioConfig    `yaml:"audio"`
+	Wake           WakeConfig     `yaml:"wake"`
+	VAD            VADConfig      `yaml:"vad"`
+	ASR            ASRConfig      `yaml:"asr"`
+	LLM            LLMConfig      `yaml:"llm"`
+	TTS            TTSConfig      `yaml:"tts"`
+	Tools          ToolsConfig    `yaml:"tools"`
+	Log            LogConfig      `yaml:"log"`
+	Dialog         DialogConfig   `yaml:"dialog"`
+}
+
+// DialogConfig 对话配置。
+type DialogConfig struct {
+	// ContinuousTimeout 连续对话超时时间（秒）。
+	// 回复完成后等待用户继续说话的时间，超过此时间回到空闲状态。
+	// 设为 0 禁用连续对话模式。
+	ContinuousTimeout int `yaml:"continuous_timeout"`
+
+	// WakeReply 唤醒词触发后的回复语。
+	// 为空则不播放回复语，直接进入监听状态。
+	WakeReply string `yaml:"wake_reply"`
 }
 
 // AudioConfig 音频采集/播放配置。
@@ -165,6 +178,9 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"
+	}
+	if cfg.Dialog.ContinuousTimeout == 0 {
+		cfg.Dialog.ContinuousTimeout = 8 // 默认 8 秒
 	}
 
 	if cfg.Tools.DataDir == "" {

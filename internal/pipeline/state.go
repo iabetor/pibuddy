@@ -111,13 +111,13 @@ func validTransition(from, to State) bool {
 	}
 	switch from {
 	case StateIdle:
-		return to == StateListening
+		return to == StateListening || to == StateSpeaking // 唤醒后可以直接监听或先播放提示语
 	case StateListening:
 		return to == StateProcessing
 	case StateProcessing:
 		return to == StateSpeaking
 	case StateSpeaking:
-		return to == StateIdle
+		return to == StateIdle || to == StateListening // 播放完成后可以回到空闲或进入监听
 	}
 	return false
 }

@@ -44,6 +44,11 @@ type Pipeline struct {
 	// cancelSpeak 在进入 Speaking 状态时设置；调用后可打断播放。
 	cancelSpeak context.CancelFunc
 	speakMu     sync.Mutex
+
+	// 连续对话超时
+	continuousTimer  *time.Timer
+	continuousMu     sync.Mutex
+	lastActivityTime time.Time // 最后一次语音活动时间
 }
 
 // New 根据配置创建并初始化完整的 Pipeline。
@@ -231,9 +236,29 @@ func (p *Pipeline) processFrame(ctx context.Context, frame []float32) {
 }
 
 // handleIdle 在空闲状态下检测唤醒词。
-func (p *Pipeline) handleIdle(_ context.Context, frame []float32) {
+func (p *Pipeline) handleIdle(ctx context.Context, frame []float32) {
 	if p.wakeDetector.Detect(frame) {
 		log.Println("[pipeline] 检测到唤醒词！")
+		p.vadDetector.Reset()
+		p.recognizer.Reset()
+
+		// 如果配置了唤醒回复语，先播放再进入监听
+		if p.cfg.Dialog.WakeReply != "" {
+			p.state.Transition(StateSpeaking)
+			go p.playWakeReply(ctx)
+		} else {
+			p.state.Transition(StateListening)
+		}
+	}
+}
+
+// playWakeReply 播放唤醒回复语，完成后进入监听状态。
+func (p *Pipeline) playWakeReply(ctx context.Context) {
+	log.Printf("[pipeline] 播放唤醒回复: %s", p.cfg.Dialog.WakeReply)
+	p.speakText(ctx, p.cfg.Dialog.WakeReply)
+
+	// 播放完成后进入监听状态
+	if p.state.Current() == StateSpeaking {
 		p.vadDetector.Reset()
 		p.recognizer.Reset()
 		p.state.Transition(StateListening)
@@ -250,10 +275,18 @@ func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
 		log.Printf("[pipeline] 实时识别: %s", text)
 	}
 
+	// 检测到语音活动，重置连续对话超时计时器
+	if p.vadDetector.IsSpeech() {
+		p.resetContinuousTimer()
+	}
+
 	if p.recognizer.IsEndpoint() {
 		finalText := p.recognizer.GetResult()
 		p.recognizer.Reset()
 		p.vadDetector.Reset()
+
+		// 停止连续对话计时器（用户正在说话，进入处理阶段）
+		p.stopContinuousTimer()
 
 		if strings.TrimSpace(finalText) == "" {
 			log.Println("[pipeline] ASR 结果为空，回到空闲状态")
@@ -393,7 +426,76 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 		// 继续下一轮 LLM 调用
 	}
 
-	p.state.ForceIdle()
+	// 回复完成后进入连续对话模式（等待用户继续说）
+	p.enterContinuousMode()
+}
+
+// enterContinuousMode 进入连续对话模式。
+// 回复完成后不立即回到空闲，而是进入监听状态并启动超时计时器。
+func (p *Pipeline) enterContinuousMode() {
+	if p.cfg.Dialog.ContinuousTimeout <= 0 {
+		// 连续对话模式禁用，直接回到空闲
+		p.state.ForceIdle()
+		return
+	}
+
+	// 进入监听状态
+	p.vadDetector.Reset()
+	p.recognizer.Reset()
+	p.state.ForceIdle() // 先重置
+	p.state.Transition(StateListening)
+
+	// 启动超时计时器
+	p.startContinuousTimer()
+	log.Printf("[pipeline] 进入连续对话模式，%d 秒内无输入将回到空闲", p.cfg.Dialog.ContinuousTimeout)
+}
+
+// startContinuousTimer 启动连续对话超时计时器。
+func (p *Pipeline) startContinuousTimer() {
+	p.continuousMu.Lock()
+	defer p.continuousMu.Unlock()
+
+	// 停止之前的计时器
+	if p.continuousTimer != nil {
+		p.continuousTimer.Stop()
+	}
+
+	// 记录当前时间作为最后活动时间
+	p.lastActivityTime = time.Now()
+
+	// 启动新计时器
+	p.continuousTimer = time.AfterFunc(time.Duration(p.cfg.Dialog.ContinuousTimeout)*time.Second, func() {
+		p.continuousMu.Lock()
+		// 检查是否超时（如果期间有语音活动，不触发）
+		if time.Since(p.lastActivityTime) >= time.Duration(p.cfg.Dialog.ContinuousTimeout)*time.Second {
+			p.continuousMu.Unlock()
+			// 超时，回到空闲状态
+			if p.state.Current() == StateListening {
+				log.Println("[pipeline] 连续对话超时，回到空闲状态")
+				p.state.ForceIdle()
+			}
+		} else {
+			p.continuousMu.Unlock()
+		}
+	})
+}
+
+// stopContinuousTimer 停止连续对话超时计时器。
+func (p *Pipeline) stopContinuousTimer() {
+	p.continuousMu.Lock()
+	defer p.continuousMu.Unlock()
+
+	if p.continuousTimer != nil {
+		p.continuousTimer.Stop()
+		p.continuousTimer = nil
+	}
+}
+
+// resetContinuousTimer 重置连续对话超时计时器（检测到语音活动时调用）。
+func (p *Pipeline) resetContinuousTimer() {
+	p.continuousMu.Lock()
+	p.lastActivityTime = time.Now()
+	p.continuousMu.Unlock()
 }
 
 // speakText 合成并播放单段文本。

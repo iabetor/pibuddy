@@ -1,6 +1,9 @@
 package llm
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestContextManager_AddAndMessages(t *testing.T) {
 	cm := NewContextManager("you are a bot", 5)
@@ -12,8 +15,12 @@ func TestContextManager_AddAndMessages(t *testing.T) {
 	if len(msgs) != 3 {
 		t.Fatalf("expected 3 messages (system + 2), got %d", len(msgs))
 	}
-	if msgs[0].Role != "system" || msgs[0].Content != "you are a bot" {
-		t.Errorf("first message should be system prompt, got %+v", msgs[0])
+	if msgs[0].Role != "system" || !strings.HasPrefix(msgs[0].Content, "you are a bot") {
+		t.Errorf("first message should start with system prompt, got %+v", msgs[0])
+	}
+	// system prompt 应包含动态注入的当前时间
+	if !strings.Contains(msgs[0].Content, "当前时间:") {
+		t.Errorf("system prompt should contain current time, got %q", msgs[0].Content)
 	}
 	if msgs[1].Role != "user" || msgs[1].Content != "hello" {
 		t.Errorf("second message mismatch: %+v", msgs[1])
@@ -77,8 +84,11 @@ func TestContextManager_MessagesAlwaysStartsWithSystem(t *testing.T) {
 	if msgs[0].Role != "system" {
 		t.Errorf("expected system role, got %q", msgs[0].Role)
 	}
-	if msgs[0].Content != "system prompt" {
-		t.Errorf("expected system prompt content, got %q", msgs[0].Content)
+	if !strings.HasPrefix(msgs[0].Content, "system prompt") {
+		t.Errorf("expected system prompt prefix, got %q", msgs[0].Content)
+	}
+	if !strings.Contains(msgs[0].Content, "当前时间:") {
+		t.Errorf("system prompt should contain current time, got %q", msgs[0].Content)
 	}
 }
 

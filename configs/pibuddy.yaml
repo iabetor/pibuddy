@@ -11,7 +11,7 @@ wake:
 vad:
   model_path: "./models/vad/silero_vad.onnx"
   threshold: 0.5
-  min_silence_ms: 1200
+  min_silence_ms: 3000  # 静音 3 秒视为说话结束（延长以适应说话慢的情况）
 
 asr:
   model_path: "./models/asr"
@@ -41,6 +41,10 @@ tts:
 
 log:
   level: "info"
+
+dialog:
+  continuous_timeout: 8  # 连续对话超时（秒），回复后等待用户继续说话的时间
+  wake_reply: "我在，请问有什么可以帮助您的？"  # 唤醒回复语，为空则不播放
 
 tools:
   data_dir: "~/.pibuddy"
