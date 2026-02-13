@@ -11,7 +11,7 @@ wake:
 vad:
   model_path: "./models/vad/silero_vad.onnx"
   threshold: 0.5
-  min_silence_ms: 3000  # 静音 3 秒视为说话结束（延长以适应说话慢的情况）
+  min_silence_ms: 5000  # 静音 5 秒视为说话结束（延长以适应说话慢的情况）
 
 asr:
   model_path: "./models/asr"
@@ -22,9 +22,9 @@ llm:
   api_url: "https://api.deepseek.com/v1"
   api_key: "${PIBUDDY_LLM_API_KEY}"
   model: "deepseek-chat"
-  system_prompt: "你是小派，一个运行在树莓派上的智能家庭助手。请用简洁友好的中文回答，不要使用emoji表情符号。你可以查询天气、新闻热搜、股票行情，可以设置闹钟提醒，可以记录备忘，可以做数学计算，还可以告诉用户当前时间日期。回答尽量简短口语化，适合语音播报。"
+  system_prompt: "你是小派，一个运行在树莓派上的智能家庭助手。请用简洁友好的中文回答，不要使用emoji表情符号。你可以查询天气、新闻热搜、股票行情，可以设置闹钟提醒，可以记录备忘，可以做数学计算，还可以告诉用户当前时间日期，还可以播放音乐。当用户想听歌时，使用play_music工具搜索并播放音乐。你也可以和用户闲聊、讲故事、回答问题。回答尽量简短口语化，适合语音播报，但讲故事或回答问题时可以适当详细。"
   max_history: 10
-  max_tokens: 500
+  max_tokens: 1000
 
 tts:
   engine: "tencent"
@@ -33,7 +33,7 @@ tts:
     secret_key: "${PIBUDDY_TENCENT_SECRET_KEY}"
     voice_type: 502001
     region: "ap-guangzhou"
-    speed: -1
+    speed: 0
   edge:
     voice: "zh-CN-XiaoxiaoNeural"
   piper:
@@ -43,7 +43,7 @@ log:
   level: "info"
 
 dialog:
-  continuous_timeout: 8  # 连续对话超时（秒），回复后等待用户继续说话的时间
+  continuous_timeout: 10  # 连续对话超时（秒），回复后等待用户继续说话的时间
   wake_reply: "我在，请问有什么可以帮助您的？"  # 唤醒回复语，为空则不播放
 
 tools:
@@ -56,3 +56,6 @@ tools:
     private_key_path: "./ed25519-private.pem"
     # API Key 认证（回退）
     api_key: "${PIBUDDY_QWEATHER_API_KEY}"
+  music:
+    enabled: true
+    api_url: "http://localhost:3000"  # NeteaseCloudMusicApi 地址

@@ -14,6 +14,7 @@ import (
 	"github.com/iabetor/pibuddy/internal/audio"
 	"github.com/iabetor/pibuddy/internal/config"
 	"github.com/iabetor/pibuddy/internal/llm"
+	"github.com/iabetor/pibuddy/internal/music"
 	"github.com/iabetor/pibuddy/internal/tools"
 	"github.com/iabetor/pibuddy/internal/tts"
 	"github.com/iabetor/pibuddy/internal/vad"
@@ -45,10 +46,17 @@ type Pipeline struct {
 	cancelSpeak context.CancelFunc
 	speakMu     sync.Mutex
 
+	// 流式播放器（音乐）
+	streamPlayer *audio.StreamPlayer
+
 	// 连续对话超时
 	continuousTimer  *time.Timer
 	continuousMu     sync.Mutex
 	lastActivityTime time.Time // 最后一次语音活动时间
+
+	// 唤醒词防抖
+	wakeCooldown   bool      // 是否处于冷却期
+	wakeCooldownMu sync.Mutex
 }
 
 // New 根据配置创建并初始化完整的 Pipeline。
@@ -127,6 +135,9 @@ func New(cfg *config.Config) (*Pipeline, error) {
 		return nil, fmt.Errorf("初始化工具失败: %w", err)
 	}
 
+	// 初始化流式播放器（音乐）
+	p.streamPlayer = audio.NewStreamPlayer(p.player)
+
 	log.Println("[pipeline] 所有组件初始化完成")
 	return p, nil
 }
@@ -172,6 +183,25 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 	// 新闻和股票
 	p.toolRegistry.Register(tools.NewNewsTool())
 	p.toolRegistry.Register(tools.NewStockTool())
+
+	// 音乐工具
+	if cfg.Tools.Music.Enabled {
+		var musicProvider music.Provider
+		musicProvider = music.NewNeteaseClient(cfg.Tools.Music.APIURL)
+
+		// 创建播放历史存储
+		musicHistory, err := music.NewHistoryStore(cfg.Tools.DataDir)
+		if err != nil {
+			log.Printf("[pipeline] 创建音乐历史存储失败: %v", err)
+		}
+
+		p.toolRegistry.Register(tools.NewMusicTool(tools.MusicConfig{
+			Provider: musicProvider,
+			History:  musicHistory,
+			Enabled:  true,
+		}))
+		p.toolRegistry.Register(tools.NewListMusicHistoryTool(musicHistory))
+	}
 
 	log.Printf("[pipeline] 已注册 %d 个工具", p.toolRegistry.Count())
 	return nil
@@ -228,17 +258,30 @@ func (p *Pipeline) processFrame(ctx context.Context, frame []float32) {
 		p.handleIdle(ctx, frame)
 	case StateListening:
 		p.handleListening(ctx, frame)
-	case StateProcessing:
-		p.checkWakeInterrupt(frame)
-	case StateSpeaking:
-		p.checkWakeInterrupt(frame)
+	case StateProcessing, StateSpeaking:
+		// 播放/处理期间不处理音频帧，避免识别到播放内容
 	}
 }
 
 // handleIdle 在空闲状态下检测唤醒词。
 func (p *Pipeline) handleIdle(ctx context.Context, frame []float32) {
+	// 检查是否在冷却期
+	p.wakeCooldownMu.Lock()
+	if p.wakeCooldown {
+		p.wakeCooldownMu.Unlock()
+		return
+	}
+	p.wakeCooldownMu.Unlock()
+
 	if p.wakeDetector.Detect(frame) {
 		log.Println("[pipeline] 检测到唤醒词！")
+
+		// 进入冷却期，防止重复检测
+		p.wakeCooldownMu.Lock()
+		p.wakeCooldown = true
+		p.wakeCooldownMu.Unlock()
+
+		p.wakeDetector.Reset()
 		p.vadDetector.Reset()
 		p.recognizer.Reset()
 
@@ -248,8 +291,17 @@ func (p *Pipeline) handleIdle(ctx context.Context, frame []float32) {
 			go p.playWakeReply(ctx)
 		} else {
 			p.state.Transition(StateListening)
+			// 1秒后解除冷却期
+			time.AfterFunc(1*time.Second, p.clearWakeCooldown)
 		}
 	}
+}
+
+// clearWakeCooldown 解除唤醒词冷却期。
+func (p *Pipeline) clearWakeCooldown() {
+	p.wakeCooldownMu.Lock()
+	p.wakeCooldown = false
+	p.wakeCooldownMu.Unlock()
 }
 
 // playWakeReply 播放唤醒回复语，完成后进入监听状态。
@@ -258,11 +310,12 @@ func (p *Pipeline) playWakeReply(ctx context.Context) {
 	p.speakText(ctx, p.cfg.Dialog.WakeReply)
 
 	// 播放完成后进入监听状态
-	if p.state.Current() == StateSpeaking {
-		p.vadDetector.Reset()
-		p.recognizer.Reset()
-		p.state.Transition(StateListening)
-	}
+	p.vadDetector.Reset()
+	p.recognizer.Reset()
+	p.state.SetState(StateListening)
+
+	// 解除冷却期（延迟一点，确保不会立即重复检测）
+	time.AfterFunc(500*time.Millisecond, p.clearWakeCooldown)
 }
 
 // handleListening 同时将音频送入 VAD 和 ASR。
@@ -300,18 +353,6 @@ func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
 	}
 }
 
-// checkWakeInterrupt 在非空闲状态下监听唤醒词以实现打断。
-func (p *Pipeline) checkWakeInterrupt(frame []float32) {
-	if p.wakeDetector.Detect(frame) {
-		log.Println("[pipeline] 唤醒词打断！")
-		p.interruptSpeak()
-		p.vadDetector.Reset()
-		p.recognizer.Reset()
-		p.state.ForceIdle()
-		p.state.Transition(StateListening)
-	}
-}
-
 // processQuery 将识别文本发送给 LLM，支持工具调用循环。
 // 流式接收回复，按句拆分后逐句合成并播放。
 func (p *Pipeline) processQuery(ctx context.Context, query string) {
@@ -336,7 +377,9 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 		firstSentence := true
 
 		for chunk := range textCh {
-			if p.state.Current() == StateIdle {
+			// 检查状态是否被重置（程序关闭时）
+			currentState := p.state.Current()
+			if currentState == StateIdle || currentState == StateListening {
 				// 等待 resultCh 排空
 				for range resultCh {
 				}
@@ -367,7 +410,9 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 				log.Printf("[pipeline] TTS 合成: %s", sentence)
 				p.speakText(ctx, sentence)
 
-				if p.state.Current() == StateIdle {
+				// 检查状态是否被重置
+				currentState := p.state.Current()
+				if currentState == StateIdle || currentState == StateListening {
 					for range resultCh {
 					}
 					return
@@ -379,6 +424,11 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 		result := <-resultCh
 		if result == nil {
 			break
+		}
+
+		// 检查状态是否被重置
+		if p.state.Current() == StateIdle || p.state.Current() == StateListening {
+			return
 		}
 
 		// 如果没有工具调用，处理剩余文本并结束
@@ -409,6 +459,11 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 
 		// 执行每个工具并将结果添加到上下文
 		for _, tc := range result.ToolCalls {
+			// 检查状态是否被重置
+			if p.state.Current() == StateIdle || p.state.Current() == StateListening {
+				return
+			}
+
 			log.Printf("[pipeline] 调用工具: %s(%s)", tc.Function.Name, tc.Function.Arguments)
 
 			toolResult, err := p.toolRegistry.Execute(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
@@ -416,18 +471,37 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 				toolResult = fmt.Sprintf("工具执行失败: %v", err)
 			}
 
+			// 先添加工具结果到上下文（LLM 要求每个 tool_call 都有对应的 tool 消息）
 			p.contextManager.AddMessage(llm.Message{
 				Role:       "tool",
 				Content:    toolResult,
 				ToolCallID: tc.ID,
 				Name:       tc.Function.Name,
 			})
+
+			// 检查是否是音乐播放结果
+			if tc.Function.Name == "play_music" {
+				var musicResult tools.MusicResult
+				if jsonErr := json.Unmarshal([]byte(toolResult), &musicResult); jsonErr == nil {
+					if musicResult.Success && musicResult.URL != "" {
+						// 播放音乐
+						log.Printf("[pipeline] 开始播放音乐: %s - %s", musicResult.Artist, musicResult.SongName)
+						p.playMusic(ctx, musicResult.URL)
+						// 音乐播放结束后继续
+						return
+					}
+				}
+			}
 		}
 		// 继续下一轮 LLM 调用
 	}
 
 	// 回复完成后进入连续对话模式（等待用户继续说）
-	p.enterContinuousMode()
+	// 但如果已经被打断（状态是 Listening），则不进入
+	curState := p.state.Current()
+	if curState != StateIdle && curState != StateListening {
+		p.enterContinuousMode()
+	}
 }
 
 // enterContinuousMode 进入连续对话模式。
@@ -523,6 +597,13 @@ func (p *Pipeline) speakText(ctx context.Context, text string) {
 
 	if err := p.player.Play(speakCtx, samples, sampleRate); err != nil && err != context.Canceled {
 		log.Printf("[pipeline] 播放失败: %v", err)
+		return
+	}
+
+	// 播放完成后，如果当前状态是 Speaking，回到 Processing
+	// 这样如果有后续内容（如工具调用结果），可以再次转换到 Speaking
+	if p.state.Current() == StateSpeaking {
+		p.state.SetState(StateProcessing)
 	}
 }
 
@@ -533,6 +614,28 @@ func (p *Pipeline) interruptSpeak() {
 		p.cancelSpeak()
 	}
 	p.speakMu.Unlock()
+
+	// 也停止音乐播放
+	if p.streamPlayer != nil {
+		p.streamPlayer.Stop()
+	}
+}
+
+// playMusic 播放音乐。
+func (p *Pipeline) playMusic(ctx context.Context, url string) {
+	// 确保状态为 Speaking
+	if p.state.Current() != StateSpeaking {
+		p.state.SetState(StateSpeaking)
+	}
+
+	if err := p.streamPlayer.Play(ctx, url); err != nil {
+		if err != context.Canceled {
+			log.Printf("[pipeline] 音乐播放失败: %v", err)
+		}
+	}
+
+	// 播放完成后进入连续对话模式
+	p.enterContinuousMode()
 }
 
 // Close 释放所有资源。

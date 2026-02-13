@@ -14,6 +14,7 @@ type Player struct {
 	ctx      *malgo.AllocatedContext
 	channels uint32
 	mu       sync.Mutex
+	closed   bool
 }
 
 // NewPlayer 创建一个新的音频播放实例。
@@ -40,7 +41,11 @@ func (p *Player) Play(ctx context.Context, samples []float32, sampleRate int) er
 	}
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	if p.closed {
+		p.mu.Unlock()
+		return fmt.Errorf("播放器已关闭")
+	}
+	p.mu.Unlock()
 
 	pcmBytes := Float32ToBytes(samples)
 	pos := 0
@@ -106,8 +111,17 @@ func (p *Player) Play(ctx context.Context, samples []float32, sampleRate int) er
 
 // Close 释放所有资源。
 func (p *Player) Close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return
+	}
+	p.closed = true
+
 	if p.ctx != nil {
 		_ = p.ctx.Uninit()
 		p.ctx.Free()
+		p.ctx = nil
 	}
 }

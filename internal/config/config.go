@@ -100,8 +100,15 @@ type PiperConfig struct {
 
 // ToolsConfig 工具配置。
 type ToolsConfig struct {
-	DataDir string        `yaml:"data_dir"`
+	DataDir string      `yaml:"data_dir"`
 	Weather WeatherConfig `yaml:"weather"`
+	Music   MusicConfig  `yaml:"music"`
+}
+
+// MusicConfig 音乐服务配置。
+type MusicConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	APIURL  string `yaml:"api_url"`
 }
 
 // WeatherConfig 和风天气配置。

@@ -81,6 +81,16 @@ func (d *Detector) Detect(samples []float32) bool {
 	return false
 }
 
+// Reset 清空检测器的内部缓冲区，用于防止重复检测。
+func (d *Detector) Reset() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.spotter != nil && d.stream != nil {
+		d.spotter.Reset(d.stream)
+	}
+}
+
 // Close 释放底层 sherpa-onnx 资源。
 func (d *Detector) Close() {
 	d.mu.Lock()

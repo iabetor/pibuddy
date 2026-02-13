@@ -103,6 +103,22 @@ func (sm *StateMachine) ForceIdle() {
 	}
 }
 
+// SetState 无条件设置状态为指定值（用于打断场景）。
+func (sm *StateMachine) SetState(to State) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	from := sm.current
+	if from == to {
+		return
+	}
+	sm.current = to
+	log.Printf("[state] 强制设置 %s → %s", from, to)
+	if sm.onChange != nil {
+		sm.onChange(from, to)
+	}
+}
+
 // validTransition 检查状态转换是否合法。
 func validTransition(from, to State) bool {
 	// 始终允许重置到 Idle（用于打断/错误恢复）
