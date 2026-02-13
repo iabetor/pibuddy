@@ -31,6 +31,14 @@ type DialogConfig struct {
 	// WakeReply 唤醒词触发后的回复语。
 	// 为空则不播放回复语，直接进入监听状态。
 	WakeReply string `yaml:"wake_reply"`
+
+	// InterruptReply 播放被打断时的回复语。
+	// 在播放中检测到唤醒词打断时播放，为空则不播放直接进入监听。
+	InterruptReply string `yaml:"interrupt_reply"`
+
+	// ListenDelay 播放回复语后延迟进入监听的时间（毫秒）。
+	// 给用户一点反应时间再开始监听，默认 500ms。
+	ListenDelay int `yaml:"listen_delay"`
 }
 
 // AudioConfig 音频采集/播放配置。
@@ -188,6 +196,9 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Dialog.ContinuousTimeout == 0 {
 		cfg.Dialog.ContinuousTimeout = 8 // 默认 8 秒
+	}
+	if cfg.Dialog.ListenDelay == 0 {
+		cfg.Dialog.ListenDelay = 500 // 默认 500ms
 	}
 
 	if cfg.Tools.DataDir == "" {

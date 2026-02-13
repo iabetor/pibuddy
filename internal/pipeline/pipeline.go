@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -50,13 +51,15 @@ type Pipeline struct {
 	streamPlayer *audio.StreamPlayer
 
 	// 连续对话超时
-	continuousTimer  *time.Timer
-	continuousMu     sync.Mutex
-	lastActivityTime time.Time // 最后一次语音活动时间
+	continuousTimer *time.Timer
+	continuousMu    sync.Mutex
 
 	// 唤醒词防抖
 	wakeCooldown   bool      // 是否处于冷却期
 	wakeCooldownMu sync.Mutex
+
+	// 打断标志（跨 goroutine 通信，通知 processQuery 退出）
+	interrupted atomic.Bool
 }
 
 // New 根据配置创建并初始化完整的 Pipeline。
@@ -265,8 +268,12 @@ func (p *Pipeline) processFrame(ctx context.Context, frame []float32) {
 		p.handleIdle(ctx, frame)
 	case StateListening:
 		p.handleListening(ctx, frame)
-	case StateProcessing, StateSpeaking:
-		// 播放/处理期间不处理音频帧，避免识别到播放内容
+	case StateSpeaking:
+		// 播放期间检测唤醒词打断
+		p.handleSpeakingInterrupt(ctx, frame)
+	case StateProcessing:
+		// 处理期间也检测唤醒词打断（消除句间盲区）
+		p.handleProcessingInterrupt(ctx, frame)
 	}
 }
 
@@ -311,10 +318,84 @@ func (p *Pipeline) clearWakeCooldown() {
 	p.wakeCooldownMu.Unlock()
 }
 
+// handleSpeakingInterrupt 在播放状态下检测唤醒词打断。
+func (p *Pipeline) handleSpeakingInterrupt(ctx context.Context, frame []float32) {
+	if p.detectWakeWord(frame) {
+		log.Println("[pipeline] 播放中检测到唤醒词，打断播放！")
+		p.performInterrupt(ctx)
+	}
+}
+
+// handleProcessingInterrupt 在处理状态下检测唤醒词打断（消除句间 TTS 合成盲区）。
+func (p *Pipeline) handleProcessingInterrupt(ctx context.Context, frame []float32) {
+	if p.detectWakeWord(frame) {
+		log.Println("[pipeline] 处理中检测到唤醒词，打断处理！")
+		p.performInterrupt(ctx)
+	}
+}
+
+// detectWakeWord 检测唤醒词（带冷却期检查）。
+func (p *Pipeline) detectWakeWord(frame []float32) bool {
+	p.wakeCooldownMu.Lock()
+	if p.wakeCooldown {
+		p.wakeCooldownMu.Unlock()
+		return false
+	}
+	p.wakeCooldownMu.Unlock()
+
+	return p.wakeDetector.Detect(frame)
+}
+
+// performInterrupt 执行打断逻辑：停止播放、设置打断标志、播放回复、延迟后进入监听。
+func (p *Pipeline) performInterrupt(ctx context.Context) {
+	// 进入冷却期
+	p.wakeCooldownMu.Lock()
+	p.wakeCooldown = true
+	p.wakeCooldownMu.Unlock()
+
+	p.wakeDetector.Reset()
+
+	// 设置打断标志，通知 processQuery goroutine 退出
+	p.interrupted.Store(true)
+
+	// 停止所有播放
+	p.interruptSpeak()
+
+	// 重置 ASR/VAD
+	p.vadDetector.Reset()
+	p.recognizer.Reset()
+
+	// 播放打断回复语（区别于唤醒回复语）
+	if p.cfg.Dialog.InterruptReply != "" {
+		log.Printf("[pipeline] 播放打断回复: %s", p.cfg.Dialog.InterruptReply)
+		p.speakText(ctx, p.cfg.Dialog.InterruptReply)
+	}
+
+	// 延迟后进入监听状态（给用户反应时间）
+	if p.cfg.Dialog.ListenDelay > 0 {
+		time.Sleep(time.Duration(p.cfg.Dialog.ListenDelay) * time.Millisecond)
+	}
+
+	p.state.SetState(StateListening)
+
+	// 启动连续对话超时计时器
+	if p.cfg.Dialog.ContinuousTimeout > 0 {
+		p.startContinuousTimer()
+	}
+
+	// 延迟解除冷却期
+	time.AfterFunc(500*time.Millisecond, p.clearWakeCooldown)
+}
+
 // playWakeReply 播放唤醒回复语，完成后进入监听状态。
 func (p *Pipeline) playWakeReply(ctx context.Context) {
 	log.Printf("[pipeline] 播放唤醒回复: %s", p.cfg.Dialog.WakeReply)
 	p.speakText(ctx, p.cfg.Dialog.WakeReply)
+
+	// 延迟后进入监听状态（给用户反应时间）
+	if p.cfg.Dialog.ListenDelay > 0 {
+		time.Sleep(time.Duration(p.cfg.Dialog.ListenDelay) * time.Millisecond)
+	}
 
 	// 播放完成后进入监听状态
 	p.vadDetector.Reset()
@@ -345,14 +426,13 @@ func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
 		p.recognizer.Reset()
 		p.vadDetector.Reset()
 
-		// 停止连续对话计时器（用户正在说话，进入处理阶段）
-		p.stopContinuousTimer()
-
 		if strings.TrimSpace(finalText) == "" {
-			log.Println("[pipeline] ASR 结果为空，回到空闲状态")
-			p.state.ForceIdle()
+			// ASR 结果为空，继续监听，等待超时计时器触发
 			return
 		}
+
+		// 有有效文本，停止计时器，进入处理阶段
+		p.stopContinuousTimer()
 
 		log.Printf("[pipeline] ASR 最终结果: %s", finalText)
 		p.state.Transition(StateProcessing)
@@ -363,12 +443,20 @@ func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
 // processQuery 将识别文本发送给 LLM，支持工具调用循环。
 // 流式接收回复，按句拆分后逐句合成并播放。
 func (p *Pipeline) processQuery(ctx context.Context, query string) {
+	// 重置打断标志
+	p.interrupted.Store(false)
+
 	p.contextManager.Add("user", query)
 
 	toolDefs := p.toolRegistry.Definitions()
 	maxRounds := 3
 
 	for round := 0; round < maxRounds; round++ {
+		// 检查打断
+		if p.interrupted.Load() {
+			return
+		}
+
 		messages := p.contextManager.Messages()
 
 		textCh, resultCh, err := p.llmProvider.ChatStreamWithTools(ctx, messages, toolDefs)
@@ -384,10 +472,8 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 		firstSentence := true
 
 		for chunk := range textCh {
-			// 检查状态是否被重置（程序关闭时）
-			currentState := p.state.Current()
-			if currentState == StateIdle || currentState == StateListening {
-				// 等待 resultCh 排空
+			// 检查打断
+			if p.interrupted.Load() {
 				for range resultCh {
 				}
 				return
@@ -417,9 +503,8 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 				log.Printf("[pipeline] TTS 合成: %s", sentence)
 				p.speakText(ctx, sentence)
 
-				// 检查状态是否被重置
-				currentState := p.state.Current()
-				if currentState == StateIdle || currentState == StateListening {
+				// 检查打断
+				if p.interrupted.Load() {
 					for range resultCh {
 					}
 					return
@@ -433,15 +518,15 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 			break
 		}
 
-		// 检查状态是否被重置
-		if p.state.Current() == StateIdle || p.state.Current() == StateListening {
+		// 检查打断
+		if p.interrupted.Load() {
 			return
 		}
 
 		// 如果没有工具调用，处理剩余文本并结束
 		if len(result.ToolCalls) == 0 {
 			remainder := strings.TrimSpace(sentenceBuf.String())
-			if remainder != "" && p.state.Current() != StateIdle {
+			if remainder != "" && !p.interrupted.Load() {
 				if firstSentence {
 					p.state.Transition(StateSpeaking)
 				}
@@ -453,8 +538,9 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 			break
 		}
 
-		// 有工具调用 — 执行工具，然后继续下一轮
+		// 有工具调用 — 切回 Processing，执行工具，然后继续下一轮
 		log.Printf("[pipeline] 第 %d 轮工具调用: %d 个工具", round+1, len(result.ToolCalls))
+		p.state.SetState(StateProcessing)
 
 		// 将 assistant 消息（含 tool_calls）添加到上下文
 		assistantMsg := llm.Message{
@@ -466,8 +552,8 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 
 		// 执行每个工具并将结果添加到上下文
 		for _, tc := range result.ToolCalls {
-			// 检查状态是否被重置
-			if p.state.Current() == StateIdle || p.state.Current() == StateListening {
+			// 检查打断
+			if p.interrupted.Load() {
 				return
 			}
 
@@ -504,9 +590,8 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 	}
 
 	// 回复完成后进入连续对话模式（等待用户继续说）
-	// 但如果已经被打断（状态是 Listening），则不进入
-	curState := p.state.Current()
-	if curState != StateIdle && curState != StateListening {
+	// 但如果已经被打断，则不进入
+	if !p.interrupted.Load() {
 		p.enterContinuousMode()
 	}
 }
@@ -541,22 +626,11 @@ func (p *Pipeline) startContinuousTimer() {
 		p.continuousTimer.Stop()
 	}
 
-	// 记录当前时间作为最后活动时间
-	p.lastActivityTime = time.Now()
-
-	// 启动新计时器
+	// 启动新计时器，超时后直接回到空闲
 	p.continuousTimer = time.AfterFunc(time.Duration(p.cfg.Dialog.ContinuousTimeout)*time.Second, func() {
-		p.continuousMu.Lock()
-		// 检查是否超时（如果期间有语音活动，不触发）
-		if time.Since(p.lastActivityTime) >= time.Duration(p.cfg.Dialog.ContinuousTimeout)*time.Second {
-			p.continuousMu.Unlock()
-			// 超时，回到空闲状态
-			if p.state.Current() == StateListening {
-				log.Println("[pipeline] 连续对话超时，回到空闲状态")
-				p.state.ForceIdle()
-			}
-		} else {
-			p.continuousMu.Unlock()
+		if p.state.Current() == StateListening {
+			log.Println("[pipeline] 连续对话超时，回到空闲状态")
+			p.state.ForceIdle()
 		}
 	})
 }
@@ -574,9 +648,8 @@ func (p *Pipeline) stopContinuousTimer() {
 
 // resetContinuousTimer 重置连续对话超时计时器（检测到语音活动时调用）。
 func (p *Pipeline) resetContinuousTimer() {
-	p.continuousMu.Lock()
-	p.lastActivityTime = time.Now()
-	p.continuousMu.Unlock()
+	// 重新启动计时器（相当于重置超时时间）
+	p.startContinuousTimer()
 }
 
 // speakText 合成并播放单段文本。
@@ -605,12 +678,6 @@ func (p *Pipeline) speakText(ctx context.Context, text string) {
 	if err := p.player.Play(speakCtx, samples, sampleRate); err != nil && err != context.Canceled {
 		log.Printf("[pipeline] 播放失败: %v", err)
 		return
-	}
-
-	// 播放完成后，如果当前状态是 Speaking，回到 Processing
-	// 这样如果有后续内容（如工具调用结果），可以再次转换到 Speaking
-	if p.state.Current() == StateSpeaking {
-		p.state.SetState(StateProcessing)
 	}
 }
 
