@@ -36,6 +36,11 @@ if [ ! -f "${MODELS_DIR}/kws/tokens.txt" ]; then
     tar xjf kws-model.tar.bz2
     cp sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/*.onnx "${MODELS_DIR}/kws/"
     cp sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/tokens.txt "${MODELS_DIR}/kws/"
+    cp sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/keywords.txt "${MODELS_DIR}/kws/"
+    # 追加自定义唤醒词"你好小派"
+    if ! grep -q "@你好小派" "${MODELS_DIR}/kws/keywords.txt"; then
+        echo 'n ǐ h ǎo x iǎo p ài @你好小派' >> "${MODELS_DIR}/kws/keywords.txt"
+    fi
     rm -rf kws-model.tar.bz2 sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01
     echo "Wake word model downloaded."
 else

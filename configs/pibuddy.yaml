@@ -5,7 +5,7 @@ audio:
 
 wake:
   model_path: "./models/kws"
-  keywords: "你好小派"
+  keywords_file: "./models/kws/keywords.txt"
   threshold: 0.5
 
 vad:

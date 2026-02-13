@@ -17,20 +17,20 @@ type Detector struct {
 }
 
 // NewDetector 创建唤醒词检测器。
-// modelPath: 包含 encoder.onnx、decoder.onnx、joiner.onnx、tokens.txt 的目录
-// keywords: 唤醒词配置（如关键词文件内容或关键词字符串）
+// modelPath: 包含 encoder/decoder/joiner onnx 和 tokens.txt 的目录
+// keywordsFile: 关键词文件路径（拼音 token 格式）
 // threshold: 检测灵敏度（0-1，越低越灵敏）
-func NewDetector(modelPath, keywords string, threshold float32) (*Detector, error) {
+func NewDetector(modelPath, keywordsFile string, threshold float32) (*Detector, error) {
 	config := sherpa.KeywordSpotterConfig{}
 
 	// 特征提取配置
 	config.FeatConfig.SampleRate = 16000
 	config.FeatConfig.FeatureDim = 80
 
-	// Transducer 模型文件路径
-	config.ModelConfig.Transducer.Encoder = filepath.Join(modelPath, "encoder.onnx")
-	config.ModelConfig.Transducer.Decoder = filepath.Join(modelPath, "decoder.onnx")
-	config.ModelConfig.Transducer.Joiner = filepath.Join(modelPath, "joiner.onnx")
+	// Transducer 模型文件路径（使用 int8 量化版本，更适合树莓派）
+	config.ModelConfig.Transducer.Encoder = filepath.Join(modelPath, "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx")
+	config.ModelConfig.Transducer.Decoder = filepath.Join(modelPath, "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx")
+	config.ModelConfig.Transducer.Joiner = filepath.Join(modelPath, "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx")
 
 	// 词表和运行时配置
 	config.ModelConfig.Tokens = filepath.Join(modelPath, "tokens.txt")
@@ -38,7 +38,7 @@ func NewDetector(modelPath, keywords string, threshold float32) (*Detector, erro
 	config.ModelConfig.Provider = "cpu"
 
 	// 关键词配置
-	config.KeywordsBuf = keywords
+	config.KeywordsFile = keywordsFile
 	config.KeywordsThreshold = threshold
 
 	spotter := sherpa.NewKeywordSpotter(&config)

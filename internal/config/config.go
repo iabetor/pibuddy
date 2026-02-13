@@ -28,9 +28,9 @@ type AudioConfig struct {
 
 // WakeConfig 唤醒词检测配置。
 type WakeConfig struct {
-	ModelPath string  `yaml:"model_path"`
-	Keywords  string  `yaml:"keywords"`
-	Threshold float32 `yaml:"threshold"`
+	ModelPath    string  `yaml:"model_path"`
+	KeywordsFile string  `yaml:"keywords_file"`
+	Threshold    float32 `yaml:"threshold"`
 }
 
 // VADConfig 语音活动检测配置。

@@ -63,7 +63,7 @@ func New(cfg *config.Config) (*Pipeline, error) {
 	}
 
 	// 唤醒词检测器
-	p.wakeDetector, err = wake.NewDetector(cfg.Wake.ModelPath, cfg.Wake.Keywords, cfg.Wake.Threshold)
+	p.wakeDetector, err = wake.NewDetector(cfg.Wake.ModelPath, cfg.Wake.KeywordsFile, cfg.Wake.Threshold)
 	if err != nil {
 		p.Close()
 		return nil, fmt.Errorf("初始化唤醒词检测器失败: %w", err)
