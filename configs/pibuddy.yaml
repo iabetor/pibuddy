@@ -22,7 +22,7 @@ llm:
   api_url: "https://api.deepseek.com/v1"
   api_key: "${PIBUDDY_LLM_API_KEY}"
   model: "deepseek-chat"
-  system_prompt: "你是小派，一个智能家庭助手。请用简洁友好的中文回答。不要使用emoji表情符号。"
+  system_prompt: "你是小派，一个运行在树莓派上的智能家庭助手。请用简洁友好的中文回答，不要使用emoji表情符号。你可以查询天气、新闻热搜、股票行情，可以设置闹钟提醒，可以记录备忘，可以做数学计算，还可以告诉用户当前时间日期。回答尽量简短口语化，适合语音播报。"
   max_history: 10
   max_tokens: 500
 
@@ -33,7 +33,7 @@ tts:
     secret_key: "${PIBUDDY_TENCENT_SECRET_KEY}"
     voice_type: 502001
     region: "ap-guangzhou"
-    speed: -1.5
+    speed: -1
   edge:
     voice: "zh-CN-XiaoxiaoNeural"
   piper:
@@ -41,3 +41,14 @@ tts:
 
 log:
   level: "info"
+
+tools:
+  data_dir: "~/.pibuddy"
+  weather:
+    api_host: "q75ctvjkwx.re.qweatherapi.com"
+    # JWT 认证（推荐）
+    credential_id: "${PIBUDDY_QWEATHER_CREDENTIAL_ID}"
+    project_id: "${PIBUDDY_QWEATHER_PROJECT_ID}"
+    private_key_path: "./ed25519-private.pem"
+    # API Key 认证（回退）
+    api_key: "${PIBUDDY_QWEATHER_API_KEY}"

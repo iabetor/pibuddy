@@ -16,6 +16,7 @@ type Config struct {
 	ASR   ASRConfig   `yaml:"asr"`
 	LLM   LLMConfig   `yaml:"llm"`
 	TTS   TTSConfig   `yaml:"tts"`
+	Tools ToolsConfig `yaml:"tools"`
 	Log   LogConfig   `yaml:"log"`
 }
 
@@ -84,6 +85,22 @@ type PiperConfig struct {
 	ModelPath string `yaml:"model_path"`
 }
 
+// ToolsConfig 工具配置。
+type ToolsConfig struct {
+	DataDir string        `yaml:"data_dir"`
+	Weather WeatherConfig `yaml:"weather"`
+}
+
+// WeatherConfig 和风天气配置。
+type WeatherConfig struct {
+	APIKey  string `yaml:"api_key"`
+	APIHost string `yaml:"api_host"`
+	// JWT 认证（推荐）
+	CredentialID   string `yaml:"credential_id"`
+	ProjectID      string `yaml:"project_id"`
+	PrivateKeyPath string `yaml:"private_key_path"`
+}
+
 // LogConfig 日志配置。
 type LogConfig struct {
 	Level string `yaml:"level"`
@@ -148,6 +165,15 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"
+	}
+
+	if cfg.Tools.DataDir == "" {
+		home, _ := os.UserHomeDir()
+		if home != "" {
+			cfg.Tools.DataDir = home + "/.pibuddy"
+		} else {
+			cfg.Tools.DataDir = "./.pibuddy-data"
+		}
 	}
 
 	// 去除 API Key 两端可能的空白（环境变量展开后常见）

@@ -22,10 +22,15 @@ func NewContextManager(systemPrompt string, maxHistory int) *ContextManager {
 // Add 添加一条消息到对话历史。
 // 当消息数超过 maxHistory*2 时，自动截掉最早的消息只保留最近的部分。
 func (cm *ContextManager) Add(role, content string) {
-	cm.messages = append(cm.messages, Message{
+	cm.AddMessage(Message{
 		Role:    role,
 		Content: content,
 	})
+}
+
+// AddMessage 添加一条完整消息到对话历史（支持 tool_calls 等字段）。
+func (cm *ContextManager) AddMessage(msg Message) {
+	cm.messages = append(cm.messages, msg)
 
 	limit := cm.maxHistory * 2
 	if len(cm.messages) > limit {

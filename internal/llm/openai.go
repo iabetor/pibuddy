@@ -36,57 +36,96 @@ func NewOpenAIProvider(apiURL, apiKey, model string) *OpenAIProvider {
 
 // chatRequest 是发送到 chat completions 接口的 JSON 请求体。
 type chatRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Stream   bool      `json:"stream"`
+	Model    string           `json:"model"`
+	Messages []Message        `json:"messages"`
+	Stream   bool             `json:"stream"`
+	Tools    []ToolDefinition `json:"tools,omitempty"`
 }
 
 // sseChunk 表示 SSE 响应中的一个流式数据块。
 type sseChunk struct {
-	Choices []struct {
-		Delta struct {
-			Content string `json:"content"`
-		} `json:"delta"`
-	} `json:"choices"`
+	Choices []sseChoice `json:"choices"`
+}
+
+type sseChoice struct {
+	Delta        sseDelta `json:"delta"`
+	FinishReason *string  `json:"finish_reason"`
+}
+
+type sseDelta struct {
+	Content   string        `json:"content"`
+	ToolCalls []sseToolCall `json:"tool_calls,omitempty"`
+}
+
+type sseToolCall struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Function struct {
+		Name      string `json:"name,omitempty"`
+		Arguments string `json:"arguments,omitempty"`
+	} `json:"function"`
 }
 
 // ChatStream 向 OpenAI 兼容 API 发送对话消息，返回一个 channel 逐块接收文本响应。
 func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message) (<-chan string, error) {
+	textCh, resultCh, err := p.ChatStreamWithTools(ctx, messages, nil)
+	if err != nil {
+		return nil, err
+	}
+	// 丢弃 resultCh
+	go func() {
+		for range resultCh {
+		}
+	}()
+	return textCh, nil
+}
+
+// ChatStreamWithTools 向 OpenAI 兼容 API 发送带工具定义的对话消息。
+// textCh 逐块返回文本内容，resultCh 在流结束时返回最终结果（包含可能的 tool_calls）。
+func (p *OpenAIProvider) ChatStreamWithTools(ctx context.Context, messages []Message, tools []ToolDefinition) (<-chan string, <-chan *StreamResult, error) {
 	reqBody := chatRequest{
 		Model:    p.model,
 		Messages: messages,
 		Stream:   true,
+		Tools:    tools,
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("[llm] 序列化请求体失败: %w", err)
+		return nil, nil, fmt.Errorf("[llm] 序列化请求体失败: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		p.apiURL+"/chat/completions", bytes.NewReader(bodyBytes))
 	if err != nil {
-		return nil, fmt.Errorf("[llm] 创建请求失败: %w", err)
+		return nil, nil, fmt.Errorf("[llm] 创建请求失败: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("[llm] 请求失败: %w", err)
+		return nil, nil, fmt.Errorf("[llm] 请求失败: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("[llm] API 返回状态码 %d: %s", resp.StatusCode, string(body))
+		return nil, nil, fmt.Errorf("[llm] API 返回状态码 %d: %s", resp.StatusCode, string(body))
 	}
 
-	ch := make(chan string)
+	textCh := make(chan string)
+	resultCh := make(chan *StreamResult, 1)
 
 	go func() {
-		defer close(ch)
+		defer close(textCh)
+		defer close(resultCh)
 		defer resp.Body.Close()
+
+		var contentBuf strings.Builder
+		// toolCallsMap 用于增量拼接流式返回的 tool_calls
+		toolCallsMap := make(map[int]*ToolCall)
 
 		scanner := bufio.NewScanner(resp.Body)
 		for scanner.Scan() {
@@ -99,17 +138,15 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message) (<-
 
 			line := scanner.Text()
 
-			// 跳过空行和非 data 行
 			if line == "" || !strings.HasPrefix(line, "data: ") {
 				continue
 			}
 
 			data := strings.TrimPrefix(line, "data: ")
 
-			// 流结束信号
 			if data == "[DONE]" {
 				log.Println("[llm] SSE 流结束")
-				return
+				break
 			}
 
 			var chunk sseChunk
@@ -118,15 +155,47 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message) (<-
 				continue
 			}
 
-			if len(chunk.Choices) > 0 {
-				content := chunk.Choices[0].Delta.Content
-				if content != "" {
-					select {
-					case ch <- content:
-					case <-ctx.Done():
-						log.Println("[llm] 发送数据块时上下文已取消")
-						return
+			if len(chunk.Choices) == 0 {
+				continue
+			}
+
+			choice := chunk.Choices[0]
+			delta := choice.Delta
+
+			// 处理文本内容
+			if delta.Content != "" {
+				contentBuf.WriteString(delta.Content)
+				select {
+				case textCh <- delta.Content:
+				case <-ctx.Done():
+					log.Println("[llm] 发送数据块时上下文已取消")
+					return
+				}
+			}
+
+			// 处理 tool_calls 增量拼接
+			for _, tc := range delta.ToolCalls {
+				existing, ok := toolCallsMap[tc.Index]
+				if !ok {
+					toolCallsMap[tc.Index] = &ToolCall{
+						ID:   tc.ID,
+						Type: tc.Type,
+						Function: FunctionCall{
+							Name:      tc.Function.Name,
+							Arguments: tc.Function.Arguments,
+						},
 					}
+				} else {
+					if tc.ID != "" {
+						existing.ID = tc.ID
+					}
+					if tc.Type != "" {
+						existing.Type = tc.Type
+					}
+					if tc.Function.Name != "" {
+						existing.Function.Name += tc.Function.Name
+					}
+					existing.Function.Arguments += tc.Function.Arguments
 				}
 			}
 		}
@@ -134,7 +203,23 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message) (<-
 		if err := scanner.Err(); err != nil {
 			log.Printf("[llm] 读取响应流出错: %v", err)
 		}
+
+		// 构建最终结果
+		result := &StreamResult{
+			Content: contentBuf.String(),
+		}
+		if len(toolCallsMap) > 0 {
+			calls := make([]ToolCall, 0, len(toolCallsMap))
+			for i := 0; i < len(toolCallsMap); i++ {
+				if tc, ok := toolCallsMap[i]; ok {
+					calls = append(calls, *tc)
+				}
+			}
+			result.ToolCalls = calls
+			log.Printf("[llm] 检测到 %d 个工具调用", len(calls))
+		}
+		resultCh <- result
 	}()
 
-	return ch, nil
+	return textCh, resultCh, nil
 }

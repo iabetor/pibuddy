@@ -11,16 +11,14 @@ import (
 
 // Player 使用 malgo (miniaudio) 管理音频播放。
 type Player struct {
-	ctx        *malgo.AllocatedContext
-	sampleRate uint32
-	channels   uint32
-	mu         sync.Mutex
+	ctx      *malgo.AllocatedContext
+	channels uint32
+	mu       sync.Mutex
 }
 
 // NewPlayer 创建一个新的音频播放实例。
-// sampleRate: 播放采样率（TTS 输出通常为 24000）
 // channels: 声道数，通常为 1（单声道）
-func NewPlayer(sampleRate, channels int) (*Player, error) {
+func NewPlayer(channels int) (*Player, error) {
 	ctxConfig := malgo.ContextConfig{}
 	ctx, err := malgo.InitContext(nil, ctxConfig, nil)
 	if err != nil {
@@ -28,15 +26,15 @@ func NewPlayer(sampleRate, channels int) (*Player, error) {
 	}
 
 	return &Player{
-		ctx:        ctx,
-		sampleRate: uint32(sampleRate),
-		channels:   uint32(channels),
+		ctx:      ctx,
+		channels: uint32(channels),
 	}, nil
 }
 
 // Play 通过默认扬声器播放 float32 音频样本。
+// sampleRate 参数指定音频数据的采样率，播放设备将按此采样率播放。
 // 阻塞直到播放完成或 ctx 被取消。
-func (p *Player) Play(ctx context.Context, samples []float32) error {
+func (p *Player) Play(ctx context.Context, samples []float32, sampleRate int) error {
 	if len(samples) == 0 {
 		return nil
 	}
@@ -51,7 +49,7 @@ func (p *Player) Play(ctx context.Context, samples []float32) error {
 	deviceConfig := malgo.DefaultDeviceConfig(malgo.Playback)
 	deviceConfig.Playback.Format = malgo.FormatS16
 	deviceConfig.Playback.Channels = p.channels
-	deviceConfig.SampleRate = p.sampleRate
+	deviceConfig.SampleRate = uint32(sampleRate) // 使用音频实际采样率
 	deviceConfig.PeriodSizeInFrames = 512
 	deviceConfig.Periods = 2
 

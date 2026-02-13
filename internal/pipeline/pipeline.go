@@ -2,16 +2,19 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/iabetor/pibuddy/internal/asr"
 	"github.com/iabetor/pibuddy/internal/audio"
 	"github.com/iabetor/pibuddy/internal/config"
 	"github.com/iabetor/pibuddy/internal/llm"
+	"github.com/iabetor/pibuddy/internal/tools"
 	"github.com/iabetor/pibuddy/internal/tts"
 	"github.com/iabetor/pibuddy/internal/vad"
 	"github.com/iabetor/pibuddy/internal/wake"
@@ -32,6 +35,9 @@ type Pipeline struct {
 	contextManager *llm.ContextManager
 
 	ttsEngine tts.Engine
+
+	toolRegistry *tools.Registry
+	alarmStore   *tools.AlarmStore
 
 	state *StateMachine
 
@@ -55,8 +61,8 @@ func New(cfg *config.Config) (*Pipeline, error) {
 		return nil, fmt.Errorf("初始化音频采集失败: %w", err)
 	}
 
-	// 音频播放 —— TTS 通常输出 24kHz，默认使用此采样率
-	p.player, err = audio.NewPlayer(24000, 1)
+	// 音频播放（单声道，采样率由 TTS 动态返回）
+	p.player, err = audio.NewPlayer(1)
 	if err != nil {
 		p.capture.Close()
 		return nil, fmt.Errorf("初始化音频播放失败: %w", err)
@@ -110,8 +116,60 @@ func New(cfg *config.Config) (*Pipeline, error) {
 		return nil, fmt.Errorf("未知的 TTS 引擎: %s", cfg.TTS.Engine)
 	}
 
+	// 初始化工具
+	if err := p.initTools(cfg); err != nil {
+		p.Close()
+		return nil, fmt.Errorf("初始化工具失败: %w", err)
+	}
+
 	log.Println("[pipeline] 所有组件初始化完成")
 	return p, nil
+}
+
+// initTools 注册所有可用工具。
+func (p *Pipeline) initTools(cfg *config.Config) error {
+	p.toolRegistry = tools.NewRegistry()
+
+	// 本地工具
+	p.toolRegistry.Register(tools.NewDateTimeTool())
+	p.toolRegistry.Register(tools.NewCalculatorTool())
+
+	// 天气工具
+	if cfg.Tools.Weather.CredentialID != "" || cfg.Tools.Weather.APIKey != "" {
+		p.toolRegistry.Register(tools.NewWeatherTool(tools.WeatherConfig{
+			APIKey:         cfg.Tools.Weather.APIKey,
+			APIHost:        cfg.Tools.Weather.APIHost,
+			CredentialID:   cfg.Tools.Weather.CredentialID,
+			ProjectID:      cfg.Tools.Weather.ProjectID,
+			PrivateKeyPath: cfg.Tools.Weather.PrivateKeyPath,
+		}))
+	}
+
+	// 闹钟工具
+	var err error
+	p.alarmStore, err = tools.NewAlarmStore(cfg.Tools.DataDir)
+	if err != nil {
+		return fmt.Errorf("初始化闹钟存储失败: %w", err)
+	}
+	p.toolRegistry.Register(tools.NewSetAlarmTool(p.alarmStore))
+	p.toolRegistry.Register(tools.NewListAlarmsTool(p.alarmStore))
+	p.toolRegistry.Register(tools.NewDeleteAlarmTool(p.alarmStore))
+
+	// 备忘录工具
+	memoStore, err := tools.NewMemoStore(cfg.Tools.DataDir)
+	if err != nil {
+		return fmt.Errorf("初始化备忘录存储失败: %w", err)
+	}
+	p.toolRegistry.Register(tools.NewAddMemoTool(memoStore))
+	p.toolRegistry.Register(tools.NewListMemosTool(memoStore))
+	p.toolRegistry.Register(tools.NewDeleteMemoTool(memoStore))
+
+	// 新闻和股票
+	p.toolRegistry.Register(tools.NewNewsTool())
+	p.toolRegistry.Register(tools.NewStockTool())
+
+	log.Printf("[pipeline] 已注册 %d 个工具", p.toolRegistry.Count())
+	return nil
 }
 
 // Run 启动主循环，阻塞直到 ctx 被取消。
@@ -120,7 +178,10 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		return fmt.Errorf("启动音频采集失败: %w", err)
 	}
 
-	log.Println("[pipeline] 已启动 —— 请说唤醒词开始对话！")
+	// 启动闹钟检查 goroutine
+	go p.alarmChecker(ctx)
+
+	log.Println("[pipeline] 已启动 — 请说唤醒词开始对话！")
 
 	for {
 		select {
@@ -135,6 +196,26 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 }
 
+// alarmChecker 每 30 秒检查一次到期闹钟，到期时 TTS 播报。
+func (p *Pipeline) alarmChecker(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			dueAlarms := p.alarmStore.PopDueAlarms()
+			for _, a := range dueAlarms {
+				log.Printf("[pipeline] 闹钟到期: %s", a.Message)
+				msg := fmt.Sprintf("闹钟提醒: %s", a.Message)
+				p.speakText(ctx, msg)
+			}
+		}
+	}
+}
+
 // processFrame 根据当前状态将音频帧分发到对应的处理器。
 func (p *Pipeline) processFrame(ctx context.Context, frame []float32) {
 	switch p.state.Current() {
@@ -143,10 +224,8 @@ func (p *Pipeline) processFrame(ctx context.Context, frame []float32) {
 	case StateListening:
 		p.handleListening(ctx, frame)
 	case StateProcessing:
-		// 处理中仍然监听唤醒词，允许打断慢速的 LLM 调用
 		p.checkWakeInterrupt(frame)
 	case StateSpeaking:
-		// 播放中监听唤醒词，允许打断播放
 		p.checkWakeInterrupt(frame)
 	}
 }
@@ -166,13 +245,11 @@ func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
 	p.vadDetector.Feed(frame)
 	p.recognizer.Feed(frame)
 
-	// 获取实时部分识别结果（用于调试/反馈）
 	text := p.recognizer.GetResult()
 	if text != "" {
 		log.Printf("[pipeline] 实时识别: %s", text)
 	}
 
-	// 检查用户是否停止说话
 	if p.recognizer.IsEndpoint() {
 		finalText := p.recognizer.GetResult()
 		p.recognizer.Reset()
@@ -202,82 +279,126 @@ func (p *Pipeline) checkWakeInterrupt(frame []float32) {
 	}
 }
 
-// processQuery 将识别文本发送给 LLM，流式接收回复，
-// 按句拆分后逐句合成并播放。
+// processQuery 将识别文本发送给 LLM，支持工具调用循环。
+// 流式接收回复，按句拆分后逐句合成并播放。
 func (p *Pipeline) processQuery(ctx context.Context, query string) {
 	p.contextManager.Add("user", query)
 
-	messages := p.contextManager.Messages()
-	stream, err := p.llmProvider.ChatStream(ctx, messages)
-	if err != nil {
-		log.Printf("[pipeline] LLM 调用失败: %v", err)
-		p.state.ForceIdle()
-		return
-	}
+	toolDefs := p.toolRegistry.Definitions()
+	maxRounds := 3
 
-	// 累积完整回复，同时按句流式送 TTS
-	var fullReply strings.Builder
-	var sentenceBuf strings.Builder
+	for round := 0; round < maxRounds; round++ {
+		messages := p.contextManager.Messages()
 
-	// 第一句准备好时切换到 Speaking 状态
-	firstSentence := true
-
-	for chunk := range stream {
-		if p.state.Current() == StateIdle {
-			// 已被打断
+		textCh, resultCh, err := p.llmProvider.ChatStreamWithTools(ctx, messages, toolDefs)
+		if err != nil {
+			log.Printf("[pipeline] LLM 调用失败: %v", err)
+			p.state.ForceIdle()
 			return
 		}
 
-		fullReply.WriteString(chunk)
-		sentenceBuf.WriteString(chunk)
+		// 流式消费文本并 TTS
+		var fullReply strings.Builder
+		var sentenceBuf strings.Builder
+		firstSentence := true
 
-		// 尝试提取完整句子进行流式 TTS
-		for {
-			sentence, rest, found := extractSentence(sentenceBuf.String())
-			if !found {
-				break
-			}
-			sentenceBuf.Reset()
-			sentenceBuf.WriteString(rest)
-
-			sentence = strings.TrimSpace(sentence)
-			if sentence == "" {
-				continue
-			}
-
-			if firstSentence {
-				p.state.Transition(StateSpeaking)
-				firstSentence = false
-			}
-
-			log.Printf("[pipeline] TTS 合成: %s", sentence)
-			p.speakText(ctx, sentence)
-
+		for chunk := range textCh {
 			if p.state.Current() == StateIdle {
+				// 等待 resultCh 排空
+				for range resultCh {
+				}
 				return
 			}
-		}
-	}
 
-	// 刷新剩余文本
-	remainder := strings.TrimSpace(sentenceBuf.String())
-	if remainder != "" && p.state.Current() != StateIdle {
-		if firstSentence {
-			p.state.Transition(StateSpeaking)
-		}
-		log.Printf("[pipeline] TTS 合成剩余: %s", remainder)
-		p.speakText(ctx, remainder)
-	}
+			fullReply.WriteString(chunk)
+			sentenceBuf.WriteString(chunk)
 
-	p.contextManager.Add("assistant", fullReply.String())
-	log.Printf("[pipeline] LLM 回复完成 (%d 字符)", fullReply.Len())
+			for {
+				sentence, rest, found := extractSentence(sentenceBuf.String())
+				if !found {
+					break
+				}
+				sentenceBuf.Reset()
+				sentenceBuf.WriteString(rest)
+
+				sentence = strings.TrimSpace(sentence)
+				if sentence == "" {
+					continue
+				}
+
+				if firstSentence {
+					p.state.Transition(StateSpeaking)
+					firstSentence = false
+				}
+
+				log.Printf("[pipeline] TTS 合成: %s", sentence)
+				p.speakText(ctx, sentence)
+
+				if p.state.Current() == StateIdle {
+					for range resultCh {
+					}
+					return
+				}
+			}
+		}
+
+		// 获取最终结果（包含可能的 tool_calls）
+		result := <-resultCh
+		if result == nil {
+			break
+		}
+
+		// 如果没有工具调用，处理剩余文本并结束
+		if len(result.ToolCalls) == 0 {
+			remainder := strings.TrimSpace(sentenceBuf.String())
+			if remainder != "" && p.state.Current() != StateIdle {
+				if firstSentence {
+					p.state.Transition(StateSpeaking)
+				}
+				log.Printf("[pipeline] TTS 合成剩余: %s", remainder)
+				p.speakText(ctx, remainder)
+			}
+			p.contextManager.Add("assistant", fullReply.String())
+			log.Printf("[pipeline] LLM 回复完成 (%d 字符)", fullReply.Len())
+			break
+		}
+
+		// 有工具调用 — 执行工具，然后继续下一轮
+		log.Printf("[pipeline] 第 %d 轮工具调用: %d 个工具", round+1, len(result.ToolCalls))
+
+		// 将 assistant 消息（含 tool_calls）添加到上下文
+		assistantMsg := llm.Message{
+			Role:      "assistant",
+			Content:   result.Content,
+			ToolCalls: result.ToolCalls,
+		}
+		p.contextManager.AddMessage(assistantMsg)
+
+		// 执行每个工具并将结果添加到上下文
+		for _, tc := range result.ToolCalls {
+			log.Printf("[pipeline] 调用工具: %s(%s)", tc.Function.Name, tc.Function.Arguments)
+
+			toolResult, err := p.toolRegistry.Execute(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+			if err != nil {
+				toolResult = fmt.Sprintf("工具执行失败: %v", err)
+			}
+
+			p.contextManager.AddMessage(llm.Message{
+				Role:       "tool",
+				Content:    toolResult,
+				ToolCallID: tc.ID,
+				Name:       tc.Function.Name,
+			})
+		}
+		// 继续下一轮 LLM 调用
+	}
 
 	p.state.ForceIdle()
 }
 
 // speakText 合成并播放单段文本。
 func (p *Pipeline) speakText(ctx context.Context, text string) {
-	samples, _, err := p.ttsEngine.Synthesize(ctx, text)
+	samples, sampleRate, err := p.ttsEngine.Synthesize(ctx, text)
 	if err != nil {
 		log.Printf("[pipeline] TTS 合成失败: %v", err)
 		return
@@ -298,7 +419,7 @@ func (p *Pipeline) speakText(ctx context.Context, text string) {
 		p.speakMu.Unlock()
 	}()
 
-	if err := p.player.Play(speakCtx, samples); err != nil && err != context.Canceled {
+	if err := p.player.Play(speakCtx, samples, sampleRate); err != nil && err != context.Canceled {
 		log.Printf("[pipeline] 播放失败: %v", err)
 	}
 }
@@ -338,7 +459,6 @@ func (p *Pipeline) Close() {
 }
 
 // extractSentence 尝试从文本中提取第一个完整句子。
-// 返回 (sentence, remainder, found)。同时识别中文和英文的句末标点。
 func extractSentence(text string) (string, string, bool) {
 	sentenceEnders := []rune{'。', '！', '？', '；', '.', '!', '?', '\n'}
 	for i, r := range text {
