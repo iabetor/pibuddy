@@ -1,0 +1,5 @@
+2026-02-12T15:06:42.815Z | INFO | Starting MCP MySQL server from: /root/.nvm/versions/node/v24.11.0/lib/node_modules/@liangshanli/mcp-server-mysql/src/server-final.js
+2026-02-12T15:06:42.818Z | INFO | Starting MCP MySQL server with environment: | {"MYSQL_HOST":"21.90.220.17","MYSQL_PORT":"3306","MYSQL_USER":"root","MYSQL_DATABASE":"fwmdb","READONLY":"false","ALLOW_DDL":"false","ALLOW_DROP":"false","ALLOW_DELETE":"false","TOOL_PREFIX":"(not set)","PROJECT_NAME":"(not set)","MCP_LOG_DIR":"./.setting","MCP_DDL_LOG_FILE":"ddl.sql"}
+2026-02-12T15:06:42.821Z | INFO | MCP MySQL server process started with PID: 3239964
+2026-02-12T15:06:42.821Z | INFO | Signal handlers registered for SIGINT and SIGTERM
+2026-02-12T15:06:42.821Z | INFO | Press Ctrl+C to gracefully shutdown the server

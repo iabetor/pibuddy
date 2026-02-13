@@ -1,0 +1,37 @@
+audio:
+  sample_rate: 16000
+  channels: 1
+  frame_size: 512
+
+wake:
+  model_path: "./models/kws"
+  keywords: "你好小派"
+  threshold: 0.5
+
+vad:
+  model_path: "./models/vad/silero_vad.onnx"
+  threshold: 0.5
+  min_silence_ms: 500
+
+asr:
+  model_path: "./models/asr"
+  num_threads: 2
+
+llm:
+  provider: "openai"
+  api_url: "https://api.openai.com/v1"
+  api_key: "${PIBUDDY_LLM_API_KEY}"
+  model: "gpt-4o-mini"
+  system_prompt: "你是小派，一个智能家庭助手。请用简洁友好的中文回答。"
+  max_history: 10
+  max_tokens: 500
+
+tts:
+  engine: "edge"
+  edge:
+    voice: "zh-CN-XiaoxiaoNeural"
+  piper:
+    model_path: "./models/piper/zh_CN-huayan-medium.onnx"
+
+log:
+  level: "info"
