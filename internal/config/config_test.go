@@ -20,11 +20,11 @@ func TestSetDefaults_EmptyConfig(t *testing.T) {
 		{"Audio.FrameSize", cfg.Audio.FrameSize, 512},
 		{"Wake.Threshold", cfg.Wake.Threshold, float32(0.5)},
 		{"VAD.Threshold", cfg.VAD.Threshold, float32(0.5)},
-		{"VAD.MinSilenceMs", cfg.VAD.MinSilenceMs, 500},
+		{"VAD.MinSilenceMs", cfg.VAD.MinSilenceMs, 1200},
 		{"ASR.NumThreads", cfg.ASR.NumThreads, 2},
 		{"LLM.MaxHistory", cfg.LLM.MaxHistory, 10},
 		{"LLM.MaxTokens", cfg.LLM.MaxTokens, 500},
-		{"TTS.Engine", cfg.TTS.Engine, "edge"},
+		{"TTS.Engine", cfg.TTS.Engine, "tencent"},
 		{"TTS.Edge.Voice", cfg.TTS.Edge.Voice, "zh-CN-XiaoxiaoNeural"},
 		{"Log.Level", cfg.Log.Level, "info"},
 	}
