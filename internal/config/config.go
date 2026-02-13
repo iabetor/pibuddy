@@ -59,9 +59,18 @@ type LLMConfig struct {
 
 // TTSConfig 语音合成配置。
 type TTSConfig struct {
-	Engine string      `yaml:"engine"`
-	Edge   EdgeConfig  `yaml:"edge"`
-	Piper  PiperConfig `yaml:"piper"`
+	Engine  string        `yaml:"engine"`
+	Edge    EdgeConfig    `yaml:"edge"`
+	Piper   PiperConfig   `yaml:"piper"`
+	Tencent TencentConfig `yaml:"tencent"`
+}
+
+// TencentConfig 腾讯云 TTS 配置。
+type TencentConfig struct {
+	SecretID  string `yaml:"secret_id"`
+	SecretKey string `yaml:"secret_key"`
+	VoiceType int64  `yaml:"voice_type"`
+	Region    string `yaml:"region"`
 }
 
 // EdgeConfig Edge TTS 配置。
@@ -119,7 +128,7 @@ func setDefaults(cfg *Config) {
 		cfg.VAD.Threshold = 0.5
 	}
 	if cfg.VAD.MinSilenceMs == 0 {
-		cfg.VAD.MinSilenceMs = 500
+		cfg.VAD.MinSilenceMs = 1200
 	}
 	if cfg.ASR.NumThreads == 0 {
 		cfg.ASR.NumThreads = 2
@@ -131,7 +140,7 @@ func setDefaults(cfg *Config) {
 		cfg.LLM.MaxTokens = 500
 	}
 	if cfg.TTS.Engine == "" {
-		cfg.TTS.Engine = "edge"
+		cfg.TTS.Engine = "tencent"
 	}
 	if cfg.TTS.Edge.Voice == "" {
 		cfg.TTS.Edge.Voice = "zh-CN-XiaoxiaoNeural"

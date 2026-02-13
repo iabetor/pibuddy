@@ -10,7 +10,7 @@ PiBuddy 是一个运行在树莓派 4B 上的智能语音助手，通过唤醒�
 - **音频 I/O**: miniaudio (通过 `gen2brain/malgo` Go 绑定), ALSA 后端
 - **语音处理**: sherpa-onnx-go (唤醒词 KWS, VAD Silero, 流式 ASR Zipformer)
 - **LLM**: OpenAI 兼容协议 (SSE streaming), 支持任意兼容 API
-- **TTS**: Edge TTS (在线, `pp-group/edge-tts-go`) / Piper TTS (离线, CLI 子进程)
+- **TTS**: 腾讯云 TTS (在线, 国内推荐) / Edge TTS (在线, `pp-group/edge-tts-go`) / Piper TTS (离线, CLI 子进程)
 - **MP3 解码**: `hajimehoshi/go-mp3` (Edge TTS 输出解码)
 - **配置**: YAML (`gopkg.in/yaml.v3`), 支持 `${ENV_VAR}` 展开
 - **构建**: Makefile, 支持本地编译和 ARM64 交叉编译
@@ -63,13 +63,14 @@ PiBuddy 是一个运行在树莓派 4B 上的智能语音助手，通过唤醒�
 - 交叉编译需要 `aarch64-linux-gnu-gcc`
 - sherpa-onnx C 库需要在目标平台安装
 - 树莓派板载蓝牙信号弱, 蓝牙音箱建议距离 < 3m
-- Edge TTS 需要互联网连接; Piper TTS 可离线但需要模型文件
+- 腾讯云 TTS / Edge TTS 需要互联网连接; Piper TTS 可离线但需要模型文件
 
 ## External Dependencies
 
 | 依赖 | 用途 | 网络要求 |
 |------|------|----------|
 | OpenAI 兼容 API | 大模型对话 | 需要网络 |
-| Edge TTS (Microsoft) | 在线语音合成 | 需要网络 |
+| 腾讯云 TTS | 在线语音合成（国内推荐） | 需要网络 |
+| Edge TTS (Microsoft) | 在线语音合成（国际） | 需要网络 |
 | Piper TTS | 离线语音合成 | 不需要 (本地模型) |
 | sherpa-onnx models | 唤醒词/VAD/ASR 推理 | 首次下载需要网络 |

@@ -21,6 +21,8 @@ require (
 	github.com/k2-fsa/sherpa-onnx-go-macos v1.12.24 // indirect
 	github.com/k2-fsa/sherpa-onnx-go-windows v1.12.24 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
+	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.48 // indirect
+	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/tts v1.3.43 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	golang.org/x/arch v0.4.0 // indirect
 	golang.org/x/sys v0.22.0 // indirect

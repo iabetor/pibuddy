@@ -89,6 +89,17 @@ func New(cfg *config.Config) (*Pipeline, error) {
 
 	// TTS 引擎
 	switch cfg.TTS.Engine {
+	case "tencent":
+		p.ttsEngine, err = tts.NewTencentEngine(tts.TencentConfig{
+			SecretID:  cfg.TTS.Tencent.SecretID,
+			SecretKey: cfg.TTS.Tencent.SecretKey,
+			VoiceType: cfg.TTS.Tencent.VoiceType,
+			Region:    cfg.TTS.Tencent.Region,
+		})
+		if err != nil {
+			p.Close()
+			return nil, fmt.Errorf("初始化腾讯云 TTS 失败: %w", err)
+		}
 	case "edge":
 		p.ttsEngine = tts.NewEdgeEngine(cfg.TTS.Edge.Voice)
 	case "piper":
