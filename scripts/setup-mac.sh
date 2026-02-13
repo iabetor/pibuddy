@@ -109,6 +109,28 @@ else
     echo "Piper TTS model already exists, skipping."
 fi
 
+# --- NeteaseCloudMusicApi (optional, for music playback) ---
+echo ""
+echo "--- Setting up NeteaseCloudMusicApi (optional) ---"
+NETEASE_DIR="${PIBUDDY_DIR}/NeteaseCloudMusicApi"
+if command -v node &>/dev/null; then
+    echo "Node.js: $(node --version)"
+    if [ ! -d "${NETEASE_DIR}" ]; then
+        echo "Cloning NeteaseCloudMusicApi..."
+        git clone --depth 1 https://github.com/Binaryify/NeteaseCloudMusicApi.git "${NETEASE_DIR}"
+    else
+        echo "NeteaseCloudMusicApi already exists, updating..."
+        cd "${NETEASE_DIR}"
+        git pull || true
+    fi
+    cd "${NETEASE_DIR}"
+    npm install --silent
+    echo "NeteaseCloudMusicApi installed at ${NETEASE_DIR}"
+else
+    echo "Node.js not found, skipping NeteaseCloudMusicApi."
+    echo "  Install Node.js via: brew install node"
+fi
+
 # --- Build ---
 echo ""
 echo "--- Building PiBuddy ---"
@@ -141,7 +163,10 @@ echo "       llm:"
 echo "         api_url: \"https://api.deepseek.com/v1\""
 echo "         model: \"deepseek-chat\""
 echo ""
-echo "  3. Run PiBuddy:"
+echo "  3. Start NeteaseCloudMusicApi (for music playback):"
+echo "       cd ${NETEASE_DIR} && node app.js &"
+echo ""
+echo "  4. Run PiBuddy:"
 echo "       ./bin/pibuddy -config configs/pibuddy.yaml"
 echo ""
-echo "  4. Say \"你好小派\" to wake up!"
+echo "  5. Say \"你好小派\" to wake up!"

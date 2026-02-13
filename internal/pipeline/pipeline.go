@@ -200,11 +200,13 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 			log.Printf("[pipeline] 创建音乐历史存储失败: %v", err)
 		}
 
-		p.toolRegistry.Register(tools.NewMusicTool(tools.MusicConfig{
+		musicCfg := tools.MusicConfig{
 			Provider: musicProvider,
 			History:  musicHistory,
 			Enabled:  true,
-		}))
+		}
+		p.toolRegistry.Register(tools.NewSearchMusicTool(musicCfg))
+		p.toolRegistry.Register(tools.NewPlayMusicTool(musicCfg))
 		p.toolRegistry.Register(tools.NewListMusicHistoryTool(musicHistory))
 	}
 

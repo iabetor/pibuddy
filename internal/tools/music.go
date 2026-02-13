@@ -15,28 +15,27 @@ type MusicConfig struct {
 	Enabled  bool
 }
 
-// MusicTool 播放音乐。
-type MusicTool struct {
+// ---- SearchMusicTool 搜索音乐 ----
+
+type SearchMusicTool struct {
 	provider music.Provider
-	history  *music.HistoryStore
 	enabled  bool
 }
 
-func NewMusicTool(cfg MusicConfig) *MusicTool {
-	return &MusicTool{
+func NewSearchMusicTool(cfg MusicConfig) *SearchMusicTool {
+	return &SearchMusicTool{
 		provider: cfg.Provider,
-		history:  cfg.History,
 		enabled:  cfg.Enabled,
 	}
 }
 
-func (t *MusicTool) Name() string { return "play_music" }
+func (t *SearchMusicTool) Name() string { return "search_music" }
 
-func (t *MusicTool) Description() string {
-	return "播放音乐。当用户想听歌、播放音乐时调用。"
+func (t *SearchMusicTool) Description() string {
+	return "搜索音乐。当用户想听歌时先调用此工具搜索，返回搜索结果列表，等待用户确认后再播放。"
 }
 
-func (t *MusicTool) Parameters() json.RawMessage {
+func (t *SearchMusicTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
 		"properties": {
@@ -49,23 +48,27 @@ func (t *MusicTool) Parameters() json.RawMessage {
 	}`)
 }
 
-// MusicResult 音乐播放结果，供 Pipeline 解析。
-type MusicResult struct {
-	Success   bool   `json:"success"`
-	SongName  string `json:"song_name,omitempty"`
-	Artist    string `json:"artist,omitempty"`
-	URL       string `json:"url,omitempty"`
-	Error     string `json:"error,omitempty"`
-	NeedsVIP  bool   `json:"needs_vip,omitempty"`
+// SearchResult 搜索结果，供 LLM 展示给用户。
+type SearchResult struct {
+	Success bool    `json:"success"`
+	Songs   []SongInfo `json:"songs,omitempty"`
+	Error   string  `json:"error,omitempty"`
 }
 
-func (t *MusicTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+type SongInfo struct {
+	ID     int64  `json:"id"`
+	Name   string `json:"name"`
+	Artist string `json:"artist"`
+	Album  string `json:"album"`
+}
+
+func (t *SearchMusicTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	if !t.enabled || t.provider == nil {
-		result := MusicResult{
+		result := SearchResult{
 			Success: false,
 			Error:   "音乐服务未启用，请先部署 NeteaseCloudMusicApi",
 		}
-		return marshalResult(result)
+		return marshalMusicResult(result)
 	}
 
 	var params struct {
@@ -82,55 +85,154 @@ func (t *MusicTool) Execute(ctx context.Context, args json.RawMessage) (string, 
 	// 搜索歌曲
 	songs, err := t.provider.Search(ctx, params.Keyword, 5)
 	if err != nil {
-		result := MusicResult{
+		result := SearchResult{
 			Success: false,
 			Error:   fmt.Sprintf("搜索失败: %v", err),
 		}
-		return marshalResult(result)
+		return marshalMusicResult(result)
 	}
 
 	if len(songs) == 0 {
-		result := MusicResult{
+		result := SearchResult{
 			Success: false,
 			Error:   "没有找到相关歌曲",
 		}
-		return marshalResult(result)
+		return marshalMusicResult(result)
 	}
 
-	// 尝试获取播放 URL，优先选择可播放的歌曲
-	for _, song := range songs {
-		url, err := t.provider.GetSongURL(ctx, song.ID)
-		if err != nil {
-			continue // 跳过无法获取 URL 的歌曲
+	// 返回搜索结果列表
+	songInfos := make([]SongInfo, len(songs))
+	for i, s := range songs {
+		songInfos[i] = SongInfo{
+			ID:     s.ID,
+			Name:   s.Name,
+			Artist: s.Artist,
+			Album:  s.Album,
 		}
+	}
 
-		// 保存播放历史
-		if t.history != nil {
-			if err := t.history.Add(song); err != nil {
-				// 仅记录日志，不影响播放
-				fmt.Printf("[music] 保存播放历史失败: %v\n", err)
+	result := SearchResult{
+		Success: true,
+		Songs:   songInfos,
+	}
+	return marshalMusicResult(result)
+}
+
+// ---- PlayMusicTool 播放指定音乐 ----
+
+type PlayMusicTool struct {
+	provider music.Provider
+	history  *music.HistoryStore
+	enabled  bool
+}
+
+func NewPlayMusicTool(cfg MusicConfig) *PlayMusicTool {
+	return &PlayMusicTool{
+		provider: cfg.Provider,
+		history:  cfg.History,
+		enabled:  cfg.Enabled,
+	}
+}
+
+func (t *PlayMusicTool) Name() string { return "play_music" }
+
+func (t *PlayMusicTool) Description() string {
+	return "播放指定歌曲。用户确认后调用此工具播放。需要提供歌曲ID（从search_music结果中获取）。"
+}
+
+func (t *PlayMusicTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"song_id": {
+				"type": "integer",
+				"description": "歌曲ID，从search_music结果中获取"
+			},
+			"song_name": {
+				"type": "string",
+				"description": "歌曲名称（用于历史记录）"
+			},
+			"artist": {
+				"type": "string",
+				"description": "歌手名（用于历史记录）"
 			}
-		}
+		},
+		"required": ["song_id", "song_name", "artist"]
+	}`)
+}
 
+// MusicResult 音乐播放结果，供 Pipeline 解析。
+type MusicResult struct {
+	Success  bool   `json:"success"`
+	SongName string `json:"song_name,omitempty"`
+	Artist   string `json:"artist,omitempty"`
+	URL      string `json:"url,omitempty"`
+	Error    string `json:"error,omitempty"`
+	NeedsVIP bool   `json:"needs_vip,omitempty"`
+}
+
+func (t *PlayMusicTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	if !t.enabled || t.provider == nil {
 		result := MusicResult{
-			Success:  true,
-			SongName: song.Name,
-			Artist:   song.Artist,
-			URL:      url,
+			Success: false,
+			Error:   "音乐服务未启用，请先部署 NeteaseCloudMusicApi",
 		}
 		return marshalResult(result)
 	}
 
-	// 所有歌曲都无法获取 URL
+	var params struct {
+		SongID   int64  `json:"song_id"`
+		SongName string `json:"song_name"`
+		Artist   string `json:"artist"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("解析参数失败: %w", err)
+	}
+
+	if params.SongID == 0 {
+		return "", fmt.Errorf("缺少 song_id 参数")
+	}
+
+	// 获取播放 URL
+	url, err := t.provider.GetSongURL(ctx, params.SongID)
+	if err != nil {
+		result := MusicResult{
+			Success: false,
+			Error:   fmt.Sprintf("获取播放地址失败: %v", err),
+		}
+		return marshalResult(result)
+	}
+
+	// 保存播放历史
+	if t.history != nil {
+		song := music.Song{
+			ID:     params.SongID,
+			Name:   params.SongName,
+			Artist: params.Artist,
+		}
+		if err := t.history.Add(song); err != nil {
+			fmt.Printf("[music] 保存播放历史失败: %v\n", err)
+		}
+	}
+
 	result := MusicResult{
-		Success:  false,
-		NeedsVIP: true,
-		Error:    "找到的歌曲需要 VIP 会员才能播放",
+		Success:  true,
+		SongName: params.SongName,
+		Artist:   params.Artist,
+		URL:      url,
 	}
 	return marshalResult(result)
 }
 
 func marshalResult(result MusicResult) (string, error) {
+	data, err := json.Marshal(result)
+	if err != nil {
+		return "", fmt.Errorf("序列化结果失败: %w", err)
+	}
+	return string(data), nil
+}
+
+func marshalMusicResult(result SearchResult) (string, error) {
 	data, err := json.Marshal(result)
 	if err != nil {
 		return "", fmt.Errorf("序列化结果失败: %w", err)

@@ -79,9 +79,9 @@ func (sp *StreamPlayer) Play(ctx context.Context, url string) error {
 	sampleRate := decoder.SampleRate()
 	log.Printf("[audio] 流式播放: 采样率 %d Hz", sampleRate)
 
-	// 创建音频数据通道
-	const chunkSize = 44100 * 2 // 约 2 秒的样本数
-	const bufferChunks = 4
+	// 创建音频数据通道，根据采样率动态计算块大小
+	chunkSize := sampleRate * 2 // 约 2 秒的样本数
+	const bufferChunks = 5
 	sampleCh := make(chan []float32, bufferChunks)
 	errCh := make(chan error, 1)
 
@@ -140,23 +140,37 @@ func (sp *StreamPlayer) Play(ctx context.Context, url string) error {
 		}
 	}()
 
-	// 预缓冲：等待至少 1 块数据
-	var firstChunk []float32
-	select {
-	case <-streamCtx.Done():
-		return streamCtx.Err()
-	case err := <-errCh:
-		return err
-	case chunk, ok := <-sampleCh:
-		if !ok {
-			return nil // 空文件
+	// 预缓冲：等待至少 2 块数据
+	preBuffer := make([][]float32, 0, 2)
+preBufferLoop:
+	for len(preBuffer) < 2 {
+		select {
+		case <-streamCtx.Done():
+			return streamCtx.Err()
+		case err := <-errCh:
+			return err
+		case chunk, ok := <-sampleCh:
+			if !ok {
+				break preBufferLoop
+			}
+			preBuffer = append(preBuffer, chunk)
+			log.Printf("[audio] 预缓冲 %d/2", len(preBuffer))
 		}
-		firstChunk = chunk
-		log.Printf("[audio] 预缓冲完成，开始播放")
 	}
+	if len(preBuffer) == 0 {
+		return nil // 空文件
+	}
+	log.Printf("[audio] 预缓冲完成，开始播放")
 
-	// 转换为 PCM 字节
-	pcmData := Float32ToBytes(firstChunk)
+	// 合并预缓冲数据
+	var totalLen int
+	for _, c := range preBuffer {
+		totalLen += len(c)
+	}
+	pcmData := make([]byte, 0, totalLen*2)
+	for _, c := range preBuffer {
+		pcmData = append(pcmData, Float32ToBytes(c)...)
+	}
 	pos := 0
 	done := make(chan struct{})
 
@@ -165,7 +179,7 @@ func (sp *StreamPlayer) Play(ctx context.Context, url string) error {
 	deviceConfig.Playback.Format = malgo.FormatS16
 	deviceConfig.Playback.Channels = sp.channels
 	deviceConfig.SampleRate = uint32(sampleRate)
-	deviceConfig.PeriodSizeInFrames = 2048 // 更大的缓冲区
+	deviceConfig.PeriodSizeInFrames = 4096 // 更大的缓冲区
 	deviceConfig.Periods = 4
 
 	callbacks := malgo.DeviceCallbacks{
