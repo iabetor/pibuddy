@@ -136,7 +136,12 @@ func New(cfg *config.Config) (*Pipeline, error) {
 	}
 
 	// 初始化流式播放器（音乐）
-	p.streamPlayer = audio.NewStreamPlayer(p.player)
+	streamPlayer, err := audio.NewStreamPlayer(1) // 单声道
+	if err != nil {
+		p.Close()
+		return nil, fmt.Errorf("初始化流式播放器失败: %w", err)
+	}
+	p.streamPlayer = streamPlayer
 
 	log.Println("[pipeline] 所有组件初始化完成")
 	return p, nil

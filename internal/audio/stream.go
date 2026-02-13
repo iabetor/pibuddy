@@ -5,30 +5,45 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 
+	"github.com/gen2brain/malgo"
 	"github.com/hajimehoshi/go-mp3"
 )
 
 // StreamPlayer 支持从 HTTP URL 流式播放 MP3 音频。
 type StreamPlayer struct {
-	player *Player
-	mu     sync.Mutex
-	cancel context.CancelFunc
+	ctx      *malgo.AllocatedContext
+	channels uint32
+	mu       sync.Mutex
+	cancel   context.CancelFunc
+	closed   bool
 }
 
 // NewStreamPlayer 创建流式播放器。
-func NewStreamPlayer(player *Player) *StreamPlayer {
-	return &StreamPlayer{
-		player: player,
+func NewStreamPlayer(channels int) (*StreamPlayer, error) {
+	ctxConfig := malgo.ContextConfig{}
+	ctx, err := malgo.InitContext(nil, ctxConfig, nil)
+	if err != nil {
+		return nil, fmt.Errorf("初始化播放上下文失败: %w", err)
 	}
+
+	return &StreamPlayer{
+		ctx:      ctx,
+		channels: uint32(channels),
+	}, nil
 }
 
 // Play 从 URL 流式下载并播放 MP3 音频。
-// 使用生产者-消费者模式，后台预加载，前台播放。
 func (sp *StreamPlayer) Play(ctx context.Context, url string) error {
 	sp.mu.Lock()
+	if sp.closed {
+		sp.mu.Unlock()
+		return fmt.Errorf("播放器已关闭")
+	}
 	streamCtx, cancel := context.WithCancel(ctx)
 	sp.cancel = cancel
 	sp.mu.Unlock()
@@ -64,18 +79,17 @@ func (sp *StreamPlayer) Play(ctx context.Context, url string) error {
 	sampleRate := decoder.SampleRate()
 	log.Printf("[audio] 流式播放: 采样率 %d Hz", sampleRate)
 
-	// 创建缓冲区通道，预缓冲 5 个块（每块约 1 秒）
-	const chunkSize = 44100 // 约 1 秒的样本数
-	const bufferChunks = 5
-	const preBufferChunks = 3 // 开始播放前至少缓冲的块数
-	chunkCh := make(chan []float32, bufferChunks)
+	// 创建音频数据通道
+	const chunkSize = 44100 * 2 // 约 2 秒的样本数
+	const bufferChunks = 4
+	sampleCh := make(chan []float32, bufferChunks)
 	errCh := make(chan error, 1)
 
 	// 生产者：后台解码
 	go func() {
-		defer close(chunkCh)
+		defer close(sampleCh)
 
-		buf := make([]byte, 8192) // 更大的读取缓冲区
+		buf := make([]byte, 16384) // 更大的读取缓冲区
 		var samples []float32
 
 		for {
@@ -87,14 +101,15 @@ func (sp *StreamPlayer) Play(ctx context.Context, url string) error {
 
 			n, err := decoder.Read(buf)
 			if err != nil {
-				if err == io.EOF {
-					// 发送剩余数据
+				// EOF 或网络错误都视为播放结束
+				if err == io.EOF || isNetworkError(err) {
 					if len(samples) > 0 {
 						select {
-						case chunkCh <- samples:
+						case sampleCh <- samples:
 						case <-streamCtx.Done():
 						}
 					}
+					log.Printf("[audio] 解码结束: %v", err)
 					return
 				}
 				select {
@@ -108,18 +123,16 @@ func (sp *StreamPlayer) Play(ctx context.Context, url string) error {
 				continue
 			}
 
-			// int16 立体声转单声道 float32
 			chunkSamples := int16StereoToMonoFloat32(buf[:n])
 			samples = append(samples, chunkSamples...)
 
-			// 累积到一定量后发送
 			for len(samples) >= chunkSize {
 				chunk := make([]float32, chunkSize)
 				copy(chunk, samples[:chunkSize])
 				samples = samples[chunkSize:]
 
 				select {
-				case chunkCh <- chunk:
+				case sampleCh <- chunk:
 				case <-streamCtx.Done():
 					return
 				}
@@ -127,58 +140,96 @@ func (sp *StreamPlayer) Play(ctx context.Context, url string) error {
 		}
 	}()
 
-	// 预缓冲：等待缓冲区填充到一定程度
-	preBuffer := make([][]float32, 0, preBufferChunks)
-preBufferLoop:
-	for len(preBuffer) < preBufferChunks {
-		select {
-		case <-streamCtx.Done():
-			log.Println("[audio] 预缓冲被取消")
-			return streamCtx.Err()
-		case err := <-errCh:
-			return err
-		case chunk, ok := <-chunkCh:
-			if !ok {
-				// 文件较短，直接播放已有的
-				break preBufferLoop
-			}
-			preBuffer = append(preBuffer, chunk)
-			log.Printf("[audio] 预缓冲 %d/%d", len(preBuffer), preBufferChunks)
+	// 预缓冲：等待至少 1 块数据
+	var firstChunk []float32
+	select {
+	case <-streamCtx.Done():
+		return streamCtx.Err()
+	case err := <-errCh:
+		return err
+	case chunk, ok := <-sampleCh:
+		if !ok {
+			return nil // 空文件
 		}
-	}
-	log.Printf("[audio] 预缓冲完成，开始播放")
-
-	// 消费者：前台播放（先播放预缓冲的数据）
-	for _, chunk := range preBuffer {
-		if err := sp.player.Play(streamCtx, chunk, sampleRate); err != nil {
-			if err == context.Canceled {
-				return err
-			}
-			return fmt.Errorf("播放失败: %w", err)
-		}
+		firstChunk = chunk
+		log.Printf("[audio] 预缓冲完成，开始播放")
 	}
 
-	// 继续播放后续数据
-	for {
-		select {
-		case <-streamCtx.Done():
-			log.Println("[audio] 流式播放被取消")
-			return streamCtx.Err()
-		case err := <-errCh:
-			return err
-		case chunk, ok := <-chunkCh:
-			if !ok {
-				// 通道关闭，播放完成
-				log.Println("[audio] 流式播放完成")
-				return nil
-			}
-			if err := sp.player.Play(streamCtx, chunk, sampleRate); err != nil {
-				if err == context.Canceled {
-					return err
+	// 转换为 PCM 字节
+	pcmData := Float32ToBytes(firstChunk)
+	pos := 0
+	done := make(chan struct{})
+
+	// 配置播放设备
+	deviceConfig := malgo.DefaultDeviceConfig(malgo.Playback)
+	deviceConfig.Playback.Format = malgo.FormatS16
+	deviceConfig.Playback.Channels = sp.channels
+	deviceConfig.SampleRate = uint32(sampleRate)
+	deviceConfig.PeriodSizeInFrames = 2048 // 更大的缓冲区
+	deviceConfig.Periods = 4
+
+	callbacks := malgo.DeviceCallbacks{
+		Data: func(outputSamples, inputSamples []byte, frameCount uint32) {
+			bytesNeeded := int(frameCount) * int(sp.channels) * 2
+
+			for bytesNeeded > 0 {
+				if pos >= len(pcmData) {
+					// 当前块播完，尝试获取下一块
+					select {
+					case chunk, ok := <-sampleCh:
+						if !ok {
+							// 所有数据播完
+							for i := range outputSamples[:bytesNeeded] {
+								outputSamples[i] = 0
+							}
+							select {
+							case done <- struct{}{}:
+							default:
+							}
+							return
+						}
+						pcmData = Float32ToBytes(chunk)
+						pos = 0
+					default:
+						// 通道为空，填充静音等待
+						for i := range outputSamples[:bytesNeeded] {
+							outputSamples[i] = 0
+						}
+						return
+					}
 				}
-				return fmt.Errorf("播放失败: %w", err)
+
+				end := pos + bytesNeeded
+				if end > len(pcmData) {
+					end = len(pcmData)
+				}
+				copied := copy(outputSamples[len(outputSamples)-bytesNeeded:], pcmData[pos:end])
+				pos = end
+				bytesNeeded -= copied
 			}
-		}
+		},
+	}
+
+	device, err := malgo.InitDevice(sp.ctx.Context, deviceConfig, callbacks)
+	if err != nil {
+		return fmt.Errorf("初始化播放设备失败: %w", err)
+	}
+	defer device.Uninit()
+
+	if err := device.Start(); err != nil {
+		return fmt.Errorf("启动播放设备失败: %w", err)
+	}
+	defer device.Stop()
+
+	select {
+	case <-streamCtx.Done():
+		log.Println("[audio] 流式播放被取消")
+		return streamCtx.Err()
+	case err := <-errCh:
+		return err
+	case <-done:
+		log.Println("[audio] 流式播放完成")
+		return nil
 	}
 }
 
@@ -191,6 +242,23 @@ func (sp *StreamPlayer) Stop() {
 	sp.mu.Unlock()
 }
 
+// Close 释放资源。
+func (sp *StreamPlayer) Close() {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	if sp.closed {
+		return
+	}
+	sp.closed = true
+
+	if sp.ctx != nil {
+		_ = sp.ctx.Uninit()
+		sp.ctx.Free()
+		sp.ctx = nil
+	}
+}
+
 // int16StereoToMonoFloat32 将 int16 立体声 PCM 转换为单声道 float32。
 func int16StereoToMonoFloat32(data []byte) []float32 {
 	numSamples := len(data) / 4
@@ -200,11 +268,25 @@ func int16StereoToMonoFloat32(data []byte) []float32 {
 	samples := make([]float32, numSamples)
 
 	for i := 0; i < numSamples; i++ {
-		// 小端序：低字节在前
 		left := int16(data[i*4]) | int16(data[i*4+1])<<8
 		right := int16(data[i*4+2]) | int16(data[i*4+3])<<8
 		samples[i] = (float32(left) + float32(right)) / 65536.0
 	}
 
 	return samples
+}
+
+// isNetworkError 判断是否为网络错误（连接断开等）。
+func isNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// 连接被重置、连接断开等
+	if netErr, ok := err.(net.Error); ok {
+		return strings.Contains(netErr.Error(), "connection reset") ||
+			strings.Contains(netErr.Error(), "broken pipe") ||
+			strings.Contains(netErr.Error(), "connection refused")
+	}
+	return strings.Contains(err.Error(), "connection reset by peer") ||
+		strings.Contains(err.Error(), "broken pipe")
 }
