@@ -39,8 +39,35 @@ func (cm *ContextManager) AddMessage(msg Message) {
 
 	limit := cm.maxHistory * 2
 	if len(cm.messages) > limit {
+		// 截断后需要清理孤立的 tool 消息（没有对应的 tool_calls）
 		cm.messages = cm.messages[len(cm.messages)-limit:]
+		cm.cleanupOrphanToolMessages()
 	}
+}
+
+// cleanupOrphanToolMessages 清理没有对应 tool_calls 的 tool 消息。
+func (cm *ContextManager) cleanupOrphanToolMessages() {
+	// 收集所有 tool_call_id
+	toolCallIDs := make(map[string]bool)
+	for _, msg := range cm.messages {
+		for _, tc := range msg.ToolCalls {
+			toolCallIDs[tc.ID] = true
+		}
+	}
+
+	// 过滤掉孤立的 tool 消息
+	var cleaned []Message
+	for _, msg := range cm.messages {
+		if msg.Role == "tool" {
+			// 只保留有对应 tool_call 的消息
+			if toolCallIDs[msg.ToolCallID] {
+				cleaned = append(cleaned, msg)
+			}
+		} else {
+			cleaned = append(cleaned, msg)
+		}
+	}
+	cm.messages = cleaned
 }
 
 // Messages 返回发送给 LLM 的完整消息列表：系统消息 + 所有对话消息。
