@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/google/uuid"
 	"github.com/hajimehoshi/go-mp3"
 	tts "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/tts/v20190823"
 
@@ -67,6 +68,7 @@ func (e *TencentEngine) Synthesize(ctx context.Context, text string) ([]float32,
 
 	request := tts.NewTextToVoiceRequest()
 	request.Text = common.StringPtr(text)
+	request.SessionId = common.StringPtr(uuid.New().String())
 	request.VoiceType = common.Int64Ptr(e.voiceType)
 	request.Codec = common.StringPtr("mp3")
 	request.Speed = common.Float64Ptr(1.0)
