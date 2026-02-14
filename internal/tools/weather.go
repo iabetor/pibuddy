@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -141,7 +142,7 @@ func (t *WeatherTool) getToken() (string, error) {
 func (t *WeatherTool) Name() string { return "get_weather" }
 
 func (t *WeatherTool) Description() string {
-	return "查询指定城市的实时天气和未来3天天气预报。当用户询问天气相关问题时使用。"
+	return "查询指定城市的实时天气和未来天气预报。当用户询问天气相关问题时使用。支持3天、7天、15天预报，默认3天。"
 }
 
 func (t *WeatherTool) Parameters() json.RawMessage {
@@ -151,6 +152,11 @@ func (t *WeatherTool) Parameters() json.RawMessage {
 			"city": {
 				"type": "string",
 				"description": "城市名称，例如 北京、上海、武汉"
+			},
+			"days": {
+				"type": "integer",
+				"description": "预报天数，可选值：3、7、15，默认为3",
+				"enum": [3, 7, 15]
 			}
 		},
 		"required": ["city"]
@@ -159,6 +165,15 @@ func (t *WeatherTool) Parameters() json.RawMessage {
 
 type weatherArgs struct {
 	City string `json:"city"`
+	Days int    `json:"days"`
+}
+
+// cityInfo 城市信息，包含经纬度。
+type cityInfo struct {
+	ID        string // LocationID
+	Name      string // 城市名称
+	Latitude  string // 纬度
+	Longitude string // 经度
 }
 
 // qweatherGeoResp 和风天气城市搜索响应。
@@ -170,6 +185,8 @@ type qweatherGeoResp struct {
 		Adm1    string `json:"adm1"`
 		Adm2    string `json:"adm2"`
 		Country string `json:"country"`
+		Lat     string `json:"lat"` // 纬度
+		Lon     string `json:"lon"` // 经度
 	} `json:"location"`
 }
 
@@ -211,8 +228,14 @@ func (t *WeatherTool) Execute(ctx context.Context, args json.RawMessage) (string
 		return "", fmt.Errorf("城市名称不能为空")
 	}
 
-	// 1. 查询城市 ID
-	locationID, cityName, err := t.lookupCity(ctx, a.City)
+	// 默认 3 天
+	days := a.Days
+	if days != 7 && days != 15 {
+		days = 3
+	}
+
+	// 1. 查询城市信息
+	city, err := t.lookupCity(ctx, a.City)
 	if err != nil {
 		return "", err
 	}
@@ -231,11 +254,11 @@ func (t *WeatherTool) Execute(ctx context.Context, args json.RawMessage) (string
 	fcCh := make(chan forecastResult, 1)
 
 	go func() {
-		data, err := t.getNow(ctx, locationID)
+		data, err := t.getNow(ctx, city.ID)
 		nowCh <- nowResult{data, err}
 	}()
 	go func() {
-		data, err := t.getForecast(ctx, locationID)
+		data, err := t.getForecast(ctx, city.ID, days)
 		fcCh <- forecastResult{data, err}
 	}()
 
@@ -249,30 +272,35 @@ func (t *WeatherTool) Execute(ctx context.Context, args json.RawMessage) (string
 		return "", fr.err
 	}
 
-	return fmt.Sprintf("%s天气:\n%s\n%s", cityName, nr.data, fr.data), nil
+	return fmt.Sprintf("%s天气:\n%s\n%s", city.Name, nr.data, fr.data), nil
 }
 
-func (t *WeatherTool) lookupCity(ctx context.Context, city string) (string, string, error) {
+func (t *WeatherTool) lookupCity(ctx context.Context, city string) (*cityInfo, error) {
 	u := fmt.Sprintf("https://%s/geo/v2/city/lookup?location=%s&number=1",
 		t.geoHost(), url.QueryEscape(city))
 
 	body, err := t.doGet(ctx, u)
 	if err != nil {
-		return "", "", fmt.Errorf("城市查询失败: %w", err)
+		return nil, fmt.Errorf("城市查询失败: %w", err)
 	}
 
 	var resp qweatherGeoResp
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return "", "", fmt.Errorf("解析城市数据失败: %w", err)
+		return nil, fmt.Errorf("解析城市数据失败: %w", err)
 	}
 
 	if resp.Code != "200" || len(resp.Location) == 0 {
-		return "", "", fmt.Errorf("未找到城市: %s (code=%s)", city, resp.Code)
+		return nil, fmt.Errorf("未找到城市: %s (code=%s)", city, resp.Code)
 	}
 
 	loc := resp.Location[0]
-	log.Printf("[tools] 天气查询城市: %s (%s, %s)", loc.Name, loc.Adm2, loc.Adm1)
-	return loc.ID, loc.Name, nil
+	log.Printf("[tools] 天气查询城市: %s (%s, %s) 经纬度: %s,%s", loc.Name, loc.Adm2, loc.Adm1, loc.Lat, loc.Lon)
+	return &cityInfo{
+		ID:        loc.ID,
+		Name:      loc.Name,
+		Latitude:  loc.Lat,
+		Longitude: loc.Lon,
+	}, nil
 }
 
 func (t *WeatherTool) getNow(ctx context.Context, locationID string) (string, error) {
@@ -298,9 +326,11 @@ func (t *WeatherTool) getNow(ctx context.Context, locationID string) (string, er
 		n.Text, n.Temp, n.FeelsLike, n.WindDir, n.WindScale, n.Humidity), nil
 }
 
-func (t *WeatherTool) getForecast(ctx context.Context, locationID string) (string, error) {
-	u := fmt.Sprintf("https://%s/v7/weather/3d?location=%s",
-		t.apiHost, locationID)
+func (t *WeatherTool) getForecast(ctx context.Context, locationID string, days int) (string, error) {
+	// 构建预报 API 路径：3d, 7d, 15d
+	daysPath := fmt.Sprintf("%dd", days)
+	u := fmt.Sprintf("https://%s/v7/weather/%s?location=%s",
+		t.apiHost, daysPath, locationID)
 
 	body, err := t.doGet(ctx, u)
 	if err != nil {
@@ -321,7 +351,7 @@ func (t *WeatherTool) getForecast(ctx context.Context, locationID string) (strin
 		lines = append(lines, fmt.Sprintf("%s: %s转%s, %s~%s°C, %s%s级",
 			d.FxDate, d.TextDay, d.TextNight, d.TempMin, d.TempMax, d.WindDirDay, d.WindScaleDay))
 	}
-	return "预报:\n" + joinLines(lines), nil
+	return fmt.Sprintf("%d天预报:\n%s", days, joinLines(lines)), nil
 }
 
 func joinLines(lines []string) string {
@@ -365,4 +395,126 @@ func (t *WeatherTool) doGet(ctx context.Context, rawURL string) ([]byte, error) 
 	defer resp.Body.Close()
 
 	return io.ReadAll(resp.Body)
+}
+
+// ============================================
+// AirQualityTool 空气质量查询工具
+// ============================================
+
+// AirQualityTool 查询空气质量信息。
+type AirQualityTool struct {
+	weather *WeatherTool
+}
+
+// NewAirQualityTool 创建空气质量查询工具。
+func NewAirQualityTool(weather *WeatherTool) *AirQualityTool {
+	return &AirQualityTool{weather: weather}
+}
+
+func (t *AirQualityTool) Name() string { return "get_air_quality" }
+
+func (t *AirQualityTool) Description() string {
+	return "查询指定城市的实时空气质量。返回AQI指数、空气质量等级、主要污染物和健康建议。"
+}
+
+func (t *AirQualityTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"city": {
+				"type": "string",
+				"description": "城市名称，例如 北京、上海、武汉"
+			}
+		},
+		"required": ["city"]
+	}`)
+}
+
+type airQualityArgs struct {
+	City string `json:"city"`
+}
+
+// qweatherAirQualityResp 空气质量 API 响应。
+type qweatherAirQualityResp struct {
+	Indexes []struct {
+		Code            string `json:"code"`
+		Name            string `json:"name"`
+		AQI             int    `json:"aqi"`
+		AQIDisplay      string `json:"aqiDisplay"`
+		Category        string `json:"category"`
+		PrimaryPollutant *struct {
+			Code     string `json:"code"`
+			Name     string `json:"name"`
+			FullName string `json:"fullName"`
+		} `json:"primaryPollutant"`
+		Health *struct {
+			Effect  string `json:"effect"`
+			Advice  struct {
+				GeneralPopulation   string `json:"generalPopulation"`
+				SensitivePopulation string `json:"sensitivePopulation"`
+			} `json:"advice"`
+		} `json:"health"`
+	} `json:"indexes"`
+	Pollutants []struct {
+		Code        string `json:"code"`
+		Name        string `json:"name"`
+		FullName    string `json:"fullName"`
+		Concentration struct {
+			Value float64 `json:"value"`
+			Unit  string  `json:"unit"`
+		} `json:"concentration"`
+	} `json:"pollutants"`
+}
+
+func (t *AirQualityTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var a airQualityArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return "", fmt.Errorf("参数解析失败: %w", err)
+	}
+	if a.City == "" {
+		return "", fmt.Errorf("城市名称不能为空")
+	}
+
+	// 1. 查询城市信息（获取经纬度）
+	city, err := t.weather.lookupCity(ctx, a.City)
+	if err != nil {
+		return "", err
+	}
+
+	// 2. 查询空气质量 - 注意：纬度在前，经度在后
+	u := fmt.Sprintf("https://%s/airquality/v1/current/%s/%s",
+		t.weather.apiHost, city.Latitude, city.Longitude)
+
+	body, err := t.weather.doGet(ctx, u)
+	if err != nil {
+		return "", fmt.Errorf("空气质量查询失败: %w", err)
+	}
+
+	var resp qweatherAirQualityResp
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", fmt.Errorf("解析空气质量数据失败: %w", err)
+	}
+
+	if len(resp.Indexes) == 0 {
+		return "", fmt.Errorf("未获取到空气质量数据")
+	}
+
+	// 取第一个 AQI 标准（通常是当地标准）
+	idx := resp.Indexes[0]
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("%s空气质量:\n", city.Name))
+	result.WriteString(fmt.Sprintf("AQI: %d, 等级: %s", idx.AQI, idx.Category))
+
+	// 主要污染物
+	if idx.PrimaryPollutant != nil {
+		result.WriteString(fmt.Sprintf("\n主要污染物: %s", idx.PrimaryPollutant.Name))
+	}
+
+	// 健康建议
+	if idx.Health != nil && idx.Health.Advice.GeneralPopulation != "" {
+		result.WriteString(fmt.Sprintf("\n健康建议: %s", idx.Health.Advice.GeneralPopulation))
+	}
+
+	return result.String(), nil
 }

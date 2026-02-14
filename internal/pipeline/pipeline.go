@@ -160,13 +160,16 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 
 	// 天气工具
 	if cfg.Tools.Weather.CredentialID != "" || cfg.Tools.Weather.APIKey != "" {
-		p.toolRegistry.Register(tools.NewWeatherTool(tools.WeatherConfig{
+		weatherTool := tools.NewWeatherTool(tools.WeatherConfig{
 			APIKey:         cfg.Tools.Weather.APIKey,
 			APIHost:        cfg.Tools.Weather.APIHost,
 			CredentialID:   cfg.Tools.Weather.CredentialID,
 			ProjectID:      cfg.Tools.Weather.ProjectID,
 			PrivateKeyPath: cfg.Tools.Weather.PrivateKeyPath,
-		}))
+		})
+		p.toolRegistry.Register(weatherTool)
+		// 空气质量工具（复用天气工具的认证）
+		p.toolRegistry.Register(tools.NewAirQualityTool(weatherTool))
 	}
 
 	// 闹钟工具
