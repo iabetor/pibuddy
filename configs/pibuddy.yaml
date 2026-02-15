@@ -55,7 +55,7 @@ tts:
   tencent:
     secret_id: "${PIBUDDY_TENCENT_SECRET_ID}"
     secret_key: "${PIBUDDY_TENCENT_SECRET_KEY}"
-    voice_type: 502001
+    voice_type: 101001
     region: "ap-guangzhou"
     speed: 0
   edge:
@@ -65,6 +65,10 @@ tts:
 
 log:
   level: "info"
+  # file: "/var/log/pibuddy/pibuddy.log"  # 日志文件路径，注释掉则只输出到控制台
+  max_size: 64      # 单个日志文件最大 64MB
+  max_backups: 3    # 保留 3 个旧日志文件
+  max_age: 7        # 旧日志文件保留 7 天
 
 dialog:
   continuous_timeout: 10  # 连续对话超时（秒），回复后等待用户继续说话的时间

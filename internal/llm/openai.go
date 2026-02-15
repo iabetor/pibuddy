@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"github.com/iabetor/pibuddy/internal/logger"
 	"net/http"
 	"strings"
 	"time"
@@ -131,7 +131,7 @@ func (p *OpenAIProvider) ChatStreamWithTools(ctx context.Context, messages []Mes
 		for scanner.Scan() {
 			select {
 			case <-ctx.Done():
-				log.Println("[llm] 上下文已取消，停止读取 SSE")
+				logger.Debug("[llm] 上下文已取消，停止读取 SSE")
 				return
 			default:
 			}
@@ -145,13 +145,13 @@ func (p *OpenAIProvider) ChatStreamWithTools(ctx context.Context, messages []Mes
 			data := strings.TrimPrefix(line, "data: ")
 
 			if data == "[DONE]" {
-				log.Println("[llm] SSE 流结束")
+				logger.Debug("[llm] SSE 流结束")
 				break
 			}
 
 			var chunk sseChunk
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-				log.Printf("[llm] 解析 SSE 数据块失败: %v", err)
+				logger.Warnf("[llm] 解析 SSE 数据块失败: %v", err)
 				continue
 			}
 
@@ -168,7 +168,7 @@ func (p *OpenAIProvider) ChatStreamWithTools(ctx context.Context, messages []Mes
 				select {
 				case textCh <- delta.Content:
 				case <-ctx.Done():
-					log.Println("[llm] 发送数据块时上下文已取消")
+					logger.Debug("[llm] 发送数据块时上下文已取消")
 					return
 				}
 			}
@@ -201,7 +201,7 @@ func (p *OpenAIProvider) ChatStreamWithTools(ctx context.Context, messages []Mes
 		}
 
 		if err := scanner.Err(); err != nil {
-			log.Printf("[llm] 读取响应流出错: %v", err)
+			logger.Errorf("[llm] 读取响应流出错: %v", err)
 		}
 
 		// 构建最终结果
@@ -216,7 +216,7 @@ func (p *OpenAIProvider) ChatStreamWithTools(ctx context.Context, messages []Mes
 				}
 			}
 			result.ToolCalls = calls
-			log.Printf("[llm] 检测到 %d 个工具调用", len(calls))
+			logger.Infof("[llm] 检测到 %d 个工具调用", len(calls))
 		}
 		resultCh <- result
 	}()

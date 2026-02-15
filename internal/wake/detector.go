@@ -2,7 +2,7 @@ package wake
 
 import (
 	"fmt"
-	"log"
+	"github.com/iabetor/pibuddy/internal/logger"
 	"path/filepath"
 	"sync"
 
@@ -52,7 +52,7 @@ func NewDetector(modelPath, keywordsFile string, threshold float32) (*Detector, 
 		return nil, fmt.Errorf("创建关键词检测流失败")
 	}
 
-	log.Printf("[wake] 唤醒词检测器已初始化 (model=%s, threshold=%.2f)", modelPath, threshold)
+	logger.Infof("[wake] 唤醒词检测器已初始化 (model=%s, threshold=%.2f)", modelPath, threshold)
 
 	return &Detector{
 		spotter: spotter,
@@ -72,7 +72,7 @@ func (d *Detector) Detect(samples []float32) bool {
 		d.spotter.Decode(d.stream)
 		result := d.spotter.GetResult(d.stream)
 		if result.Keyword != "" {
-			log.Printf("[wake] 检测到唤醒词: %s", result.Keyword)
+			logger.Infof("[wake] 检测到唤醒词: %s", result.Keyword)
 			d.spotter.Reset(d.stream)
 			return true
 		}
@@ -105,5 +105,5 @@ func (d *Detector) Close() {
 		d.spotter = nil
 	}
 
-	log.Println("[wake] 唤醒词检测器已关闭")
+	logger.Info("[wake] 唤醒词检测器已关闭")
 }

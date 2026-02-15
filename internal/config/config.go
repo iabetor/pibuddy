@@ -141,7 +141,11 @@ type WeatherConfig struct {
 
 // LogConfig 日志配置。
 type LogConfig struct {
-	Level string `yaml:"level"`
+	Level      string `yaml:"level"`       // 日志级别: debug, info, warn, error
+	File       string `yaml:"file"`        // 日志文件路径，为空则只输出到控制台
+	MaxSize    int    `yaml:"max_size"`    // 单个日志文件最大大小（MB），默认 64
+	MaxBackups int    `yaml:"max_backups"` // 保留的旧日志文件最大数量，默认 3
+	MaxAge     int    `yaml:"max_age"`     // 保留旧日志文件的最大天数，默认 7
 }
 
 // Load 读取 YAML 配置文件并返回 Config。
@@ -203,6 +207,15 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"
+	}
+	if cfg.Log.MaxSize == 0 {
+		cfg.Log.MaxSize = 64 // 默认 64MB
+	}
+	if cfg.Log.MaxBackups == 0 {
+		cfg.Log.MaxBackups = 3 // 默认保留 3 个备份
+	}
+	if cfg.Log.MaxAge == 0 {
+		cfg.Log.MaxAge = 7 // 默认保留 7 天
 	}
 	if cfg.Dialog.ContinuousTimeout == 0 {
 		cfg.Dialog.ContinuousTimeout = 8 // 默认 8 秒

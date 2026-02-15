@@ -2,7 +2,7 @@ package voiceprint
 
 import (
 	"fmt"
-	"log"
+	"github.com/iabetor/pibuddy/internal/logger"
 	"sync"
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
@@ -30,7 +30,7 @@ func NewExtractor(modelPath string, numThreads int) (*Extractor, error) {
 		return nil, fmt.Errorf("创建声纹提取器失败，模型路径: %s", modelPath)
 	}
 
-	log.Printf("[voiceprint] 声纹提取器已初始化 (model=%s, dim=%d)", modelPath, impl.Dim())
+	logger.Infof("[voiceprint] 声纹提取器已初始化 (model=%s, dim=%d)", modelPath, impl.Dim())
 
 	return &Extractor{impl: impl}, nil
 }
@@ -73,5 +73,5 @@ func (e *Extractor) Close() {
 		e.impl = nil
 	}
 
-	log.Println("[voiceprint] 声纹提取器已关闭")
+	logger.Info("[voiceprint] 声纹提取器已关闭")
 }

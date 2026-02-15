@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
-	"log"
+	"github.com/iabetor/pibuddy/internal/logger"
 	"math"
 	"os"
 	"path/filepath"
@@ -58,7 +58,7 @@ func NewStore(dataDir string) (*Store, error) {
 		return nil, err
 	}
 
-	log.Printf("[voiceprint] 声纹存储已初始化 (db=%s)", dbPath)
+	logger.Infof("[voiceprint] 声纹存储已初始化 (db=%s)", dbPath)
 
 	return &Store{db: db}, nil
 }
@@ -193,7 +193,7 @@ func (s *Store) GetAllEmbeddings() ([]UserEmbedding, error) {
 func (s *Store) Close() {
 	if s.db != nil {
 		s.db.Close()
-		log.Println("[voiceprint] 声纹存储已关闭")
+		logger.Info("[voiceprint] 声纹存储已关闭")
 	}
 }
 

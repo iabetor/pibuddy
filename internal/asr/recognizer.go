@@ -2,7 +2,7 @@ package asr
 
 import (
 	"fmt"
-	"log"
+	"github.com/iabetor/pibuddy/internal/logger"
 	"path/filepath"
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
@@ -56,7 +56,7 @@ func NewRecognizer(modelPath string, numThreads int) (*Recognizer, error) {
 		return nil, fmt.Errorf("创建在线识别流失败")
 	}
 
-	log.Printf("[asr] 语音识别器已初始化 (model=%s, threads=%d)", modelPath, numThreads)
+	logger.Infof("[asr] 语音识别器已初始化 (model=%s, threads=%d)", modelPath, numThreads)
 
 	return &Recognizer{
 		recognizer: recognizer,
@@ -101,5 +101,5 @@ func (r *Recognizer) Close() {
 		sherpa.DeleteOnlineRecognizer(r.recognizer)
 		r.recognizer = nil
 	}
-	log.Println("[asr] 语音识别器已关闭")
+	logger.Info("[asr] 语音识别器已关闭")
 }

@@ -6,7 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
-	"log"
+	"github.com/iabetor/pibuddy/internal/logger"
 	"regexp"
 	"strings"
 
@@ -39,9 +39,9 @@ type TencentConfig struct {
 func NewTencentEngine(cfg TencentConfig) (*TencentEngine, error) {
 	// 调试：打印实际收到的 SecretID 前缀，确认环境变量展开正确
 	if len(cfg.SecretID) > 8 {
-		log.Printf("[tts] 腾讯云 TTS: SecretID=%s..., SecretKey长度=%d", cfg.SecretID[:8], len(cfg.SecretKey))
+		logger.Debugf("[tts] 腾讯云 TTS: SecretID=%s..., SecretKey长度=%d", cfg.SecretID[:8], len(cfg.SecretKey))
 	} else {
-		log.Printf("[tts] 腾讯云 TTS: SecretID='%s' (长度=%d), SecretKey长度=%d", cfg.SecretID, len(cfg.SecretID), len(cfg.SecretKey))
+		logger.Debugf("[tts] 腾讯云 TTS: SecretID='%s' (长度=%d), SecretKey长度=%d", cfg.SecretID, len(cfg.SecretID), len(cfg.SecretKey))
 	}
 
 	if cfg.SecretID == "" || cfg.SecretKey == "" {
@@ -64,7 +64,7 @@ func NewTencentEngine(cfg TencentConfig) (*TencentEngine, error) {
 		return nil, fmt.Errorf("[tts] 创建腾讯云 TTS 客户端失败: %w", err)
 	}
 
-	log.Printf("[tts] 腾讯云 TTS 引擎已初始化 (voice=%d, region=%s, speed=%.1f)", cfg.VoiceType, cfg.Region, cfg.Speed)
+	logger.Infof("[tts] 腾讯云 TTS 引擎已初始化 (voice=%d, region=%s, speed=%.1f)", cfg.VoiceType, cfg.Region, cfg.Speed)
 
 	return &TencentEngine{
 		client:    client,
@@ -112,11 +112,11 @@ func (e *TencentEngine) Synthesize(ctx context.Context, text string) ([]float32,
 	// 清理文本，移除 emoji 等不可合成字符
 	cleaned := sanitizeText(text)
 	if !reHanOrLetter.MatchString(cleaned) {
-		log.Printf("[tts] 腾讯云 TTS: 跳过无有效文字的文本: %q", text)
+		logger.Debugf("[tts] 腾讯云 TTS: 跳过无有效文字的文本: %q", text)
 		return nil, 0, nil
 	}
 
-	log.Printf("[tts] 腾讯云 TTS: 正在合成 %d 个字符，音色=%d", len([]rune(cleaned)), e.voiceType)
+	logger.Debugf("[tts] 腾讯云 TTS: 正在合成 %d 个字符，音色=%d", len([]rune(cleaned)), e.voiceType)
 
 	request := tts.NewTextToVoiceRequest()
 	request.Text = common.StringPtr(cleaned)
@@ -141,7 +141,7 @@ func (e *TencentEngine) Synthesize(ctx context.Context, text string) ([]float32,
 		return nil, 0, fmt.Errorf("[tts] Base64 解码失败: %w", err)
 	}
 
-	log.Printf("[tts] 腾讯云 TTS: 收到 %d 字节 MP3 数据", len(mp3Data))
+	logger.Debugf("[tts] 腾讯云 TTS: 收到 %d 字节 MP3 数据", len(mp3Data))
 
 	// 解码 MP3 为原始 PCM
 	decoder, err := mp3.NewDecoder(bytes.NewReader(mp3Data))
@@ -168,7 +168,7 @@ func (e *TencentEngine) Synthesize(ctx context.Context, text string) ([]float32,
 	}
 
 	pcmData := pcmBuf.Bytes()
-	log.Printf("[tts] 腾讯云 TTS: 解码得到 %d 字节 PCM，采样率 %d Hz", len(pcmData), sampleRate)
+	logger.Debugf("[tts] 腾讯云 TTS: 解码得到 %d 字节 PCM，采样率 %d Hz", len(pcmData), sampleRate)
 
 	// 将立体声 signed 16-bit LE PCM 转换为单声道 float32
 	const bytesPerFrame = 4
@@ -187,7 +187,7 @@ func (e *TencentEngine) Synthesize(ctx context.Context, text string) ([]float32,
 		samples[i] = mono / 32768.0
 	}
 
-	log.Printf("[tts] 腾讯云 TTS: 生成 %d 个单声道 float32 样本", len(samples))
+	logger.Debugf("[tts] 腾讯云 TTS: 生成 %d 个单声道 float32 样本", len(samples))
 
 	return samples, sampleRate, nil
 }

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"github.com/iabetor/pibuddy/internal/logger"
 	"net"
 	"net/http"
 	"strings"
@@ -77,7 +77,7 @@ func (sp *StreamPlayer) Play(ctx context.Context, url string) error {
 	}
 
 	sampleRate := decoder.SampleRate()
-	log.Printf("[audio] 流式播放: 采样率 %d Hz", sampleRate)
+	logger.Debugf("[audio] 流式播放: 采样率 %d Hz", sampleRate)
 
 	// 创建音频数据通道，根据采样率动态计算块大小
 	chunkSize := sampleRate * 2 // 约 2 秒的样本数
@@ -109,7 +109,7 @@ func (sp *StreamPlayer) Play(ctx context.Context, url string) error {
 						case <-streamCtx.Done():
 						}
 					}
-					log.Printf("[audio] 解码结束: %v", err)
+					logger.Debugf("[audio] 解码结束: %v", err)
 					return
 				}
 				select {
@@ -154,13 +154,13 @@ preBufferLoop:
 				break preBufferLoop
 			}
 			preBuffer = append(preBuffer, chunk)
-			log.Printf("[audio] 预缓冲 %d/2", len(preBuffer))
+			logger.Debugf("[audio] 预缓冲 %d/2", len(preBuffer))
 		}
 	}
 	if len(preBuffer) == 0 {
 		return nil // 空文件
 	}
-	log.Printf("[audio] 预缓冲完成，开始播放")
+	logger.Debugf("[audio] 预缓冲完成，开始播放")
 
 	// 合并预缓冲数据
 	var totalLen int
@@ -237,12 +237,12 @@ preBufferLoop:
 
 	select {
 	case <-streamCtx.Done():
-		log.Println("[audio] 流式播放被取消")
+		logger.Debug("[audio] 流式播放被取消")
 		return streamCtx.Err()
 	case err := <-errCh:
 		return err
 	case <-done:
-		log.Println("[audio] 流式播放完成")
+		logger.Debug("[audio] 流式播放完成")
 		return nil
 	}
 }

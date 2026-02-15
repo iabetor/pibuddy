@@ -6,7 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log"
+	"github.com/iabetor/pibuddy/internal/logger"
 
 	"github.com/hajimehoshi/go-mp3"
 	"github.com/pp-group/edge-tts-go/biz/service/tts/edge"
@@ -26,7 +26,7 @@ func NewEdgeEngine(voice string) *EdgeEngine {
 // Synthesize 将文本合成为单声道 float32 音频样本。
 // 返回样本数据、采样率和错误。
 func (e *EdgeEngine) Synthesize(ctx context.Context, text string) ([]float32, int, error) {
-	log.Printf("[tts] edge-tts: 正在合成 %d 个字符，语音=%s", len([]rune(text)), e.voice)
+	logger.Debugf("[tts] edge-tts: 正在合成 %d 个字符，语音=%s", len([]rune(text)), e.voice)
 
 	// 创建 Communicate 实例并通过 Stream() 获取 MP3 音频块
 	comm, err := edge.NewCommunicate(text, edge.WithVoice(e.voice))
@@ -60,7 +60,7 @@ func (e *EdgeEngine) Synthesize(ctx context.Context, text string) ([]float32, in
 		return nil, 0, fmt.Errorf("[tts] edge-tts: 未收到音频数据")
 	}
 
-	log.Printf("[tts] edge-tts: 收到 %d 字节 MP3 数据", len(mp3Data))
+	logger.Debugf("[tts] edge-tts: 收到 %d 字节 MP3 数据", len(mp3Data))
 
 	// 解码 MP3 为原始 PCM
 	decoder, err := mp3.NewDecoder(bytes.NewReader(mp3Data))
@@ -75,7 +75,7 @@ func (e *EdgeEngine) Synthesize(ctx context.Context, text string) ([]float32, in
 		return nil, 0, fmt.Errorf("[tts] 读取 PCM 数据失败: %w", err)
 	}
 
-	log.Printf("[tts] edge-tts: 解码得到 %d 字节 PCM，采样率 %d Hz", len(pcmData), sampleRate)
+	logger.Debugf("[tts] edge-tts: 解码得到 %d 字节 PCM，采样率 %d Hz", len(pcmData), sampleRate)
 
 	// 将立体声 signed 16-bit LE PCM 转换为单声道 float32
 	// 每个立体声帧 4 字节：左声道 2 字节 + 右声道 2 字节
@@ -98,7 +98,7 @@ func (e *EdgeEngine) Synthesize(ctx context.Context, text string) ([]float32, in
 		samples[i] = mono / 32768.0
 	}
 
-	log.Printf("[tts] edge-tts: 生成 %d 个单声道 float32 样本", len(samples))
+	logger.Debugf("[tts] edge-tts: 生成 %d 个单声道 float32 样本", len(samples))
 
 	return samples, sampleRate, nil
 }

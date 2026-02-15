@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"github.com/iabetor/pibuddy/internal/logger"
 	"os"
 	"path/filepath"
 	"sync"
@@ -35,7 +35,7 @@ func NewAlarmStore(dataDir string) (*AlarmStore, error) {
 		filePath: filepath.Join(dataDir, "alarms.json"),
 	}
 	if err := s.load(); err != nil {
-		log.Printf("[tools] 加载闹钟数据失败（将使用空列表）: %v", err)
+		logger.Warnf("[tools] 加载闹钟数据失败（将使用空列表）: %v", err)
 		s.alarms = make([]AlarmEntry, 0)
 	}
 	return s, nil

@@ -1,8 +1,9 @@
 package pipeline
 
 import (
-	"log"
 	"sync"
+
+	"github.com/iabetor/pibuddy/internal/logger"
 )
 
 // State 表示流水线的当前运行状态。
@@ -74,13 +75,13 @@ func (sm *StateMachine) Transition(to State) bool {
 	defer sm.mu.Unlock()
 
 	if !validTransition(sm.current, to) {
-		log.Printf("[state] 非法转换 %s → %s", sm.current, to)
+		logger.Warnf("[state] 非法转换 %s → %s", sm.current, to)
 		return false
 	}
 
 	from := sm.current
 	sm.current = to
-	log.Printf("[state] %s → %s", from, to)
+	logger.Infof("[state] %s → %s", from, to)
 
 	if sm.onChange != nil {
 		sm.onChange(from, to)
@@ -96,7 +97,7 @@ func (sm *StateMachine) ForceIdle() {
 	from := sm.current
 	sm.current = StateIdle
 	if from != StateIdle {
-		log.Printf("[state] 强制重置 %s → Idle", from)
+		logger.Infof("[state] 强制重置 %s → Idle", from)
 		if sm.onChange != nil {
 			sm.onChange(from, StateIdle)
 		}
@@ -113,7 +114,7 @@ func (sm *StateMachine) SetState(to State) {
 		return
 	}
 	sm.current = to
-	log.Printf("[state] 强制设置 %s → %s", from, to)
+	logger.Infof("[state] 强制设置 %s → %s", from, to)
 	if sm.onChange != nil {
 		sm.onChange(from, to)
 	}

@@ -2,7 +2,7 @@ package vad
 
 import (
 	"fmt"
-	"log"
+	"github.com/iabetor/pibuddy/internal/logger"
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
 )
@@ -38,7 +38,7 @@ func NewDetector(modelPath string, threshold float32, minSilenceMs int) (*Detect
 		return nil, fmt.Errorf("创建语音活动检测器失败，模型: %s", modelPath)
 	}
 
-	log.Printf("[vad] 语音活动检测器已创建: model=%s threshold=%.2f minSilenceMs=%d",
+	logger.Infof("[vad] 语音活动检测器已创建: model=%s threshold=%.2f minSilenceMs=%d",
 		modelPath, threshold, minSilenceMs)
 
 	return &Detector{
@@ -86,6 +86,6 @@ func (d *Detector) Close() {
 	if d.vad != nil {
 		sherpa.DeleteVoiceActivityDetector(d.vad)
 		d.vad = nil
-		log.Println("[vad] 语音活动检测器已关闭")
+		logger.Info("[vad] 语音活动检测器已关闭")
 	}
 }

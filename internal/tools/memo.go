@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"github.com/iabetor/pibuddy/internal/logger"
 	"os"
 	"path/filepath"
 	"sync"
@@ -34,7 +34,7 @@ func NewMemoStore(dataDir string) (*MemoStore, error) {
 		filePath: filepath.Join(dataDir, "memos.json"),
 	}
 	if err := s.load(); err != nil {
-		log.Printf("[tools] 加载备忘录数据失败（将使用空列表）: %v", err)
+		logger.Warnf("[tools] 加载备忘录数据失败（将使用空列表）: %v", err)
 		s.memos = make([]MemoEntry, 0)
 	}
 	return s, nil

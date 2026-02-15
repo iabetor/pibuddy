@@ -2,7 +2,7 @@ package voiceprint
 
 import (
 	"fmt"
-	"log"
+	"github.com/iabetor/pibuddy/internal/logger"
 	"sync"
 
 	"github.com/iabetor/pibuddy/internal/config"
@@ -52,7 +52,7 @@ func NewManager(cfg config.VoiceprintConfig, dataDir string) (*Manager, error) {
 		return nil, fmt.Errorf("加载声纹数据失败: %w", err)
 	}
 
-	log.Printf("[voiceprint] 声纹管理器已初始化 (speakers=%d, threshold=%.2f)", m.spkMgr.NumSpeakers(), cfg.Threshold)
+	logger.Infof("[voiceprint] 声纹管理器已初始化 (speakers=%d, threshold=%.2f)", m.spkMgr.NumSpeakers(), cfg.Threshold)
 
 	return m, nil
 }
@@ -73,7 +73,7 @@ func (m *Manager) loadFromDB() error {
 	// 注册到内存索引
 	for name, embeddings := range grouped {
 		if !m.spkMgr.RegisterV(name, embeddings) {
-			log.Printf("[voiceprint] 警告: 注册用户 %s 到内存索引失败", name)
+			logger.Warnf("[voiceprint] 警告: 注册用户 %s 到内存索引失败", name)
 		}
 	}
 
@@ -96,7 +96,7 @@ func (m *Manager) Identify(samples []float32) (string, error) {
 
 	name := m.spkMgr.Search(embedding, m.threshold)
 	if name != "" {
-		log.Printf("[voiceprint] 识别到用户: %s", name)
+		logger.Debugf("[voiceprint] 识别到用户: %s", name)
 	}
 	return name, nil
 }
@@ -150,7 +150,7 @@ func (m *Manager) Register(name string, audioSamples [][]float32) error {
 		return fmt.Errorf("注册用户 %s 到内存索引失败", name)
 	}
 
-	log.Printf("[voiceprint] 用户 %s 注册成功 (%d 个样本)", name, len(audioSamples))
+	logger.Infof("[voiceprint] 用户 %s 注册成功 (%d 个样本)", name, len(audioSamples))
 	return nil
 }
 
@@ -171,7 +171,7 @@ func (m *Manager) DeleteUser(name string) error {
 	}
 
 	m.spkMgr.Remove(name)
-	log.Printf("[voiceprint] 用户 %s 已删除", name)
+	logger.Infof("[voiceprint] 用户 %s 已删除", name)
 	return nil
 }
 
@@ -198,5 +198,5 @@ func (m *Manager) Close() {
 		m.extractor.Close()
 	}
 
-	log.Println("[voiceprint] 声纹管理器已关闭")
+	logger.Info("[voiceprint] 声纹管理器已关闭")
 }

@@ -3,7 +3,7 @@ package audio
 import (
 	"context"
 	"fmt"
-	"log"
+	"github.com/iabetor/pibuddy/internal/logger"
 	"sync"
 
 	"github.com/gen2brain/malgo"
@@ -91,7 +91,7 @@ func (c *Capture) Start() error {
 
 	c.device = device
 	c.running = true
-	log.Println("[audio] 麦克风采集已启动")
+	logger.Info("[audio] 麦克风采集已启动")
 	return nil
 }
 
@@ -107,7 +107,7 @@ func (c *Capture) Stop() {
 	c.device.Stop()
 	c.device.Uninit()
 	c.running = false
-	log.Println("[audio] 麦克风采集已停止")
+	logger.Info("[audio] 麦克风采集已停止")
 }
 
 // Close 释放所有资源。

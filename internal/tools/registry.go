@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"github.com/iabetor/pibuddy/internal/logger"
 
 	"github.com/iabetor/pibuddy/internal/llm"
 )
@@ -32,7 +32,7 @@ func NewRegistry() *Registry {
 // Register 注册一个工具。
 func (r *Registry) Register(t Tool) {
 	r.tools[t.Name()] = t
-	log.Printf("[tools] 已注册工具: %s", t.Name())
+	logger.Infof("[tools] 已注册工具: %s", t.Name())
 }
 
 // Get 获取指定名称的工具。
@@ -63,13 +63,13 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 	if !ok {
 		return "", fmt.Errorf("未知工具: %s", name)
 	}
-	log.Printf("[tools] 执行工具: %s, 参数: %s", name, string(args))
+	logger.Debugf("[tools] 执行工具: %s, 参数: %s", name, string(args))
 	result, err := t.Execute(ctx, args)
 	if err != nil {
-		log.Printf("[tools] 工具 %s 执行失败: %v", name, err)
+		logger.Errorf("[tools] 工具 %s 执行失败: %v", name, err)
 		return "", err
 	}
-	log.Printf("[tools] 工具 %s 执行成功", name)
+	logger.Debugf("[tools] 工具 %s 执行成功", name)
 	return result, nil
 }
 

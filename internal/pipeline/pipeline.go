@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +14,7 @@ import (
 	"github.com/iabetor/pibuddy/internal/audio"
 	"github.com/iabetor/pibuddy/internal/config"
 	"github.com/iabetor/pibuddy/internal/llm"
+	"github.com/iabetor/pibuddy/internal/logger"
 	"github.com/iabetor/pibuddy/internal/music"
 	"github.com/iabetor/pibuddy/internal/tools"
 	"github.com/iabetor/pibuddy/internal/tts"
@@ -157,14 +157,14 @@ func New(cfg *config.Config) (*Pipeline, error) {
 	if cfg.Voiceprint.Enabled && cfg.Voiceprint.ModelPath != "" {
 		vpMgr, vpErr := voiceprint.NewManager(cfg.Voiceprint, cfg.Tools.DataDir)
 		if vpErr != nil {
-			log.Printf("[pipeline] 声纹识别初始化失败（已禁用）: %v", vpErr)
+			logger.Warnf("[pipeline] 声纹识别初始化失败（已禁用）: %v", vpErr)
 		} else {
 			p.voiceprintMgr = vpMgr
 			p.voiceprintBufSize = int(cfg.Voiceprint.BufferSecs * float32(cfg.Audio.SampleRate))
 		}
 	}
 
-	log.Println("[pipeline] 所有组件初始化完成")
+	logger.Info("[pipeline] 所有组件初始化完成")
 	return p, nil
 }
 
@@ -222,7 +222,7 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 		// 创建播放历史存储
 		musicHistory, err := music.NewHistoryStore(cfg.Tools.DataDir)
 		if err != nil {
-			log.Printf("[pipeline] 创建音乐历史存储失败: %v", err)
+			logger.Warnf("[pipeline] 创建音乐历史存储失败: %v", err)
 		}
 
 		musicCfg := tools.MusicConfig{
@@ -235,7 +235,7 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 		p.toolRegistry.Register(tools.NewListMusicHistoryTool(musicHistory))
 	}
 
-	log.Printf("[pipeline] 已注册 %d 个工具", p.toolRegistry.Count())
+	logger.Infof("[pipeline] 已注册 %d 个工具", p.toolRegistry.Count())
 	return nil
 }
 
@@ -248,7 +248,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	// 启动闹钟检查 goroutine
 	go p.alarmChecker(ctx)
 
-	log.Println("[pipeline] 已启动 — 请说唤醒词开始对话！")
+	logger.Info("[pipeline] 已启动 — 请说唤醒词开始对话！")
 
 	for {
 		select {
@@ -275,7 +275,7 @@ func (p *Pipeline) alarmChecker(ctx context.Context) {
 		case <-ticker.C:
 			dueAlarms := p.alarmStore.PopDueAlarms()
 			for _, a := range dueAlarms {
-				log.Printf("[pipeline] 闹钟到期: %s", a.Message)
+				logger.Infof("[pipeline] 闹钟到期: %s", a.Message)
 				msg := fmt.Sprintf("闹钟提醒: %s", a.Message)
 				p.speakText(ctx, msg)
 			}
@@ -310,7 +310,7 @@ func (p *Pipeline) handleIdle(ctx context.Context, frame []float32) {
 	p.wakeCooldownMu.Unlock()
 
 	if p.wakeDetector.Detect(frame) {
-		log.Println("[pipeline] 检测到唤醒词！")
+		logger.Info("[pipeline] 检测到唤醒词！")
 
 		// 进入冷却期，防止重复检测
 		p.wakeCooldownMu.Lock()
@@ -350,7 +350,7 @@ func (p *Pipeline) clearWakeCooldown() {
 // handleSpeakingInterrupt 在播放状态下检测唤醒词打断。
 func (p *Pipeline) handleSpeakingInterrupt(ctx context.Context, frame []float32) {
 	if p.detectWakeWord(frame) {
-		log.Println("[pipeline] 播放中检测到唤醒词，打断播放！")
+		logger.Info("[pipeline] 播放中检测到唤醒词，打断播放！")
 		p.performInterrupt(ctx)
 	}
 }
@@ -358,7 +358,7 @@ func (p *Pipeline) handleSpeakingInterrupt(ctx context.Context, frame []float32)
 // handleProcessingInterrupt 在处理状态下检测唤醒词打断（消除句间 TTS 合成盲区）。
 func (p *Pipeline) handleProcessingInterrupt(ctx context.Context, frame []float32) {
 	if p.detectWakeWord(frame) {
-		log.Println("[pipeline] 处理中检测到唤醒词，打断处理！")
+		logger.Info("[pipeline] 处理中检测到唤醒词，打断处理！")
 		p.performInterrupt(ctx)
 	}
 }
@@ -396,7 +396,7 @@ func (p *Pipeline) performInterrupt(ctx context.Context) {
 
 	// 播放打断回复语（区别于唤醒回复语）
 	if p.cfg.Dialog.InterruptReply != "" {
-		log.Printf("[pipeline] 播放打断回复: %s", p.cfg.Dialog.InterruptReply)
+		logger.Debugf("[pipeline] 播放打断回复: %s", p.cfg.Dialog.InterruptReply)
 		p.speakText(ctx, p.cfg.Dialog.InterruptReply)
 	}
 
@@ -418,7 +418,7 @@ func (p *Pipeline) performInterrupt(ctx context.Context) {
 
 // playWakeReply 播放唤醒回复语，完成后进入监听状态。
 func (p *Pipeline) playWakeReply(ctx context.Context) {
-	log.Printf("[pipeline] 播放唤醒回复: %s", p.cfg.Dialog.WakeReply)
+	logger.Debugf("[pipeline] 播放唤醒回复: %s", p.cfg.Dialog.WakeReply)
 	p.speakText(ctx, p.cfg.Dialog.WakeReply)
 
 	// 延迟后进入监听状态（给用户反应时间）
@@ -458,7 +458,7 @@ func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
 
 	text := p.recognizer.GetResult()
 	if text != "" {
-		log.Printf("[pipeline] 实时识别: %s", text)
+		logger.Debugf("[pipeline] 实时识别: %s", text)
 	}
 
 	// 检测到语音活动，重置连续对话超时计时器
@@ -490,7 +490,7 @@ func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
 		// 有有效文本，停止计时器，进入处理阶段
 		p.stopContinuousTimer()
 
-		log.Printf("[pipeline] ASR 最终结果: %s", finalText)
+		logger.Infof("[pipeline] ASR 最终结果: %s", finalText)
 		p.state.Transition(StateProcessing)
 		go p.processQuery(ctx, finalText)
 	}
@@ -519,7 +519,7 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 
 		textCh, resultCh, err := p.llmProvider.ChatStreamWithTools(ctx, messages, toolDefs)
 		if err != nil {
-			log.Printf("[pipeline] LLM 调用失败: %v", err)
+			logger.Errorf("[pipeline] LLM 调用失败: %v", err)
 			p.state.ForceIdle()
 			return
 		}
@@ -556,24 +556,24 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 				chunks := mergeSentences(replyText, 100)
 				for _, chunk := range chunks {
 					if chunk != "" && !p.interrupted.Load() {
-						log.Printf("[pipeline] TTS 合成: %s", chunk)
+						logger.Debugf("[pipeline] TTS 合成: %s", chunk)
 						p.speakText(ctx, chunk)
 					}
 				}
 			}
 			p.contextManager.Add("assistant", fullReply.String())
-			log.Printf("[pipeline] LLM 回复完成 (%d 字符)", fullReply.Len())
+			logger.Infof("[pipeline] LLM 回复完成 (%d 字符)", fullReply.Len())
 			break
 		}
 
 		// 有工具调用 — 丢弃前言文本（如"我来帮你查询..."）
 		preamble := strings.TrimSpace(fullReply.String())
 		if preamble != "" {
-			log.Printf("[pipeline] 检测到工具调用，丢弃前言文本: %s", preamble)
+			logger.Debugf("[pipeline] 检测到工具调用，丢弃前言文本: %s", preamble)
 		}
 
 		// 切回 Processing，执行工具
-		log.Printf("[pipeline] 第 %d 轮工具调用: %d 个工具", round+1, len(result.ToolCalls))
+		logger.Infof("[pipeline] 第 %d 轮工具调用: %d 个工具", round+1, len(result.ToolCalls))
 		p.state.SetState(StateProcessing)
 
 		// 将 assistant 消息（含 tool_calls）添加到上下文
@@ -591,7 +591,7 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 				return
 			}
 
-			log.Printf("[pipeline] 调用工具: %s(%s)", tc.Function.Name, tc.Function.Arguments)
+			logger.Infof("[pipeline] 调用工具: %s(%s)", tc.Function.Name, tc.Function.Arguments)
 
 			toolResult, err := p.toolRegistry.Execute(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
 			if err != nil {
@@ -612,7 +612,7 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 				if jsonErr := json.Unmarshal([]byte(toolResult), &musicResult); jsonErr == nil {
 					if musicResult.Success && musicResult.URL != "" {
 						// 播放音乐
-						log.Printf("[pipeline] 开始播放音乐: %s - %s", musicResult.Artist, musicResult.SongName)
+						logger.Infof("[pipeline] 开始播放音乐: %s - %s", musicResult.Artist, musicResult.SongName)
 						p.playMusic(ctx, musicResult.URL)
 						// 音乐播放结束后继续
 						return
@@ -637,11 +637,11 @@ func (p *Pipeline) identifySpeaker(samples []float32) {
 	}
 	name, err := p.voiceprintMgr.Identify(samples)
 	if err != nil {
-		log.Printf("[pipeline] 声纹识别失败: %v", err)
+		logger.Errorf("[pipeline] 声纹识别失败: %v", err)
 		return
 	}
 	if name != "" {
-		log.Printf("[pipeline] 声纹识别结果: %s", name)
+		logger.Debugf("[pipeline] 声纹识别结果: %s", name)
 	}
 	p.contextManager.SetCurrentSpeaker(name)
 }
@@ -669,7 +669,7 @@ func (p *Pipeline) enterContinuousMode() {
 
 	// 启动超时计时器
 	p.startContinuousTimer()
-	log.Printf("[pipeline] 进入连续对话模式，%d 秒内无输入将回到空闲", p.cfg.Dialog.ContinuousTimeout)
+	logger.Infof("[pipeline] 进入连续对话模式，%d 秒内无输入将回到空闲", p.cfg.Dialog.ContinuousTimeout)
 }
 
 // startContinuousTimer 启动连续对话超时计时器。
@@ -685,7 +685,7 @@ func (p *Pipeline) startContinuousTimer() {
 	// 启动新计时器，超时后直接回到空闲
 	p.continuousTimer = time.AfterFunc(time.Duration(p.cfg.Dialog.ContinuousTimeout)*time.Second, func() {
 		if p.state.Current() == StateListening {
-			log.Println("[pipeline] 连续对话超时，回到空闲状态")
+			logger.Info("[pipeline] 连续对话超时，回到空闲状态")
 			p.state.ForceIdle()
 		}
 	})
@@ -712,7 +712,7 @@ func (p *Pipeline) resetContinuousTimer() {
 func (p *Pipeline) speakText(ctx context.Context, text string) {
 	samples, sampleRate, err := p.ttsEngine.Synthesize(ctx, text)
 	if err != nil {
-		log.Printf("[pipeline] TTS 合成失败: %v", err)
+		logger.Errorf("[pipeline] TTS 合成失败: %v", err)
 		return
 	}
 	if len(samples) == 0 {
@@ -732,7 +732,7 @@ func (p *Pipeline) speakText(ctx context.Context, text string) {
 	}()
 
 	if err := p.player.Play(speakCtx, samples, sampleRate); err != nil && err != context.Canceled {
-		log.Printf("[pipeline] 播放失败: %v", err)
+		logger.Errorf("[pipeline] 播放失败: %v", err)
 		return
 	}
 }
@@ -760,7 +760,7 @@ func (p *Pipeline) playMusic(ctx context.Context, url string) {
 
 	if err := p.streamPlayer.Play(ctx, url); err != nil {
 		if err != context.Canceled {
-			log.Printf("[pipeline] 音乐播放失败: %v", err)
+			logger.Errorf("[pipeline] 音乐播放失败: %v", err)
 		}
 	}
 
@@ -770,7 +770,7 @@ func (p *Pipeline) playMusic(ctx context.Context, url string) {
 
 // Close 释放所有资源。
 func (p *Pipeline) Close() {
-	log.Println("[pipeline] 正在关闭...")
+	logger.Info("[pipeline] 正在关闭...")
 
 	p.interruptSpeak()
 
@@ -793,7 +793,7 @@ func (p *Pipeline) Close() {
 		p.voiceprintMgr.Close()
 	}
 
-	log.Println("[pipeline] 已关闭")
+	logger.Info("[pipeline] 已关闭")
 }
 
 // extractSentence 尝试从文本中提取第一个完整句子。

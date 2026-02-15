@@ -3,7 +3,7 @@ package audio
 import (
 	"context"
 	"fmt"
-	"log"
+	"github.com/iabetor/pibuddy/internal/logger"
 	"sync"
 
 	"github.com/gen2brain/malgo"
@@ -101,10 +101,10 @@ func (p *Player) Play(ctx context.Context, samples []float32, sampleRate int) er
 
 	select {
 	case <-ctx.Done():
-		log.Println("[audio] 播放被取消")
+		logger.Debug("[audio] 播放被取消")
 		return ctx.Err()
 	case <-done:
-		log.Println("[audio] 播放完成")
+		logger.Debug("[audio] 播放完成")
 		return nil
 	}
 }

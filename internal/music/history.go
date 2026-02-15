@@ -2,7 +2,7 @@ package music
 
 import (
 	"encoding/json"
-	"log"
+	"github.com/iabetor/pibuddy/internal/logger"
 	"os"
 	"path/filepath"
 	"sync"
@@ -37,7 +37,7 @@ func NewHistoryStore(dataDir string) (*HistoryStore, error) {
 		maxSize:  100, // 默认保留最近100首
 	}
 	if err := s.load(); err != nil {
-		log.Printf("[music] 加载播放历史失败（将使用空列表）: %v", err)
+		logger.Warnf("[music] 加载播放历史失败（将使用空列表）: %v", err)
 		s.entries = make([]HistoryEntry, 0)
 	}
 	return s, nil

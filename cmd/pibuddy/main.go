@@ -4,12 +4,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/iabetor/pibuddy/internal/config"
+	"github.com/iabetor/pibuddy/internal/logger"
 	"github.com/iabetor/pibuddy/internal/pipeline"
 )
 
@@ -23,7 +23,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Printf("[main] PiBuddy 启动中 (log_level=%s)", cfg.Log.Level)
+	if err := logger.Init(logger.Config{
+		Level:      cfg.Log.Level,
+		File:       cfg.Log.File,
+		MaxSize:    cfg.Log.MaxSize,
+		MaxBackups: cfg.Log.MaxBackups,
+		MaxAge:     cfg.Log.MaxAge,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "初始化日志失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer logger.Sync()
+
+	logger.Infof("[main] PiBuddy 启动中 (log_level=%s)", cfg.Log.Level)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -33,7 +45,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigCh
-		log.Printf("[main] 收到信号 %v，正在关闭...", sig)
+		logger.Infof("[main] 收到信号 %v，正在关闭...", sig)
 		cancel()
 	}()
 
@@ -49,5 +61,5 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Println("[main] PiBuddy 已停止")
+	logger.Info("[main] PiBuddy 已停止")
 }

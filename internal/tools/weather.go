@@ -9,7 +9,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-	"log"
+	"github.com/iabetor/pibuddy/internal/logger"
 	"net/http"
 	"net/url"
 	"os"
@@ -63,13 +63,13 @@ func NewWeatherTool(cfg WeatherConfig) *WeatherTool {
 	if cfg.CredentialID != "" && cfg.ProjectID != "" && cfg.PrivateKeyPath != "" {
 		privKey, err := loadEd25519PrivateKey(cfg.PrivateKeyPath)
 		if err != nil {
-			log.Printf("[tools] 加载 Ed25519 私钥失败: %v, 回退到 API Key 认证", err)
+			logger.Warnf("[tools] 加载 Ed25519 私钥失败: %v, 回退到 API Key 认证", err)
 		} else {
 			t.useJWT = true
 			t.credentialID = cfg.CredentialID
 			t.projectID = cfg.ProjectID
 			t.privateKey = privKey
-			log.Printf("[tools] 天气 API 使用 JWT 认证 (credential=%s)", cfg.CredentialID)
+			logger.Infof("[tools] 天气 API 使用 JWT 认证 (credential=%s)", cfg.CredentialID)
 		}
 	}
 
@@ -294,7 +294,7 @@ func (t *WeatherTool) lookupCity(ctx context.Context, city string) (*cityInfo, e
 	}
 
 	loc := resp.Location[0]
-	log.Printf("[tools] 天气查询城市: %s (%s, %s) 经纬度: %s,%s", loc.Name, loc.Adm2, loc.Adm1, loc.Lat, loc.Lon)
+	logger.Debugf("[tools] 天气查询城市: %s (%s, %s) 经纬度: %s,%s", loc.Name, loc.Adm2, loc.Adm1, loc.Lat, loc.Lon)
 	return &cityInfo{
 		ID:        loc.ID,
 		Name:      loc.Name,
