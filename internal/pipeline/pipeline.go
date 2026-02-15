@@ -175,6 +175,7 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 	// 本地工具
 	p.toolRegistry.Register(tools.NewDateTimeTool())
 	p.toolRegistry.Register(tools.NewCalculatorTool())
+	p.toolRegistry.Register(tools.NewLunarDateTool())
 
 	// 天气工具
 	if cfg.Tools.Weather.CredentialID != "" || cfg.Tools.Weather.APIKey != "" {
@@ -496,7 +497,9 @@ func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
 }
 
 // processQuery 将识别文本发送给 LLM，支持工具调用循环。
-// 流式接收回复，按句拆分后逐句合成并播放。
+// 所有轮次先缓冲完整回复，再根据是否有工具调用决定处理方式：
+//   - 有工具调用：丢弃前言文本，直接执行工具
+//   - 无工具调用：合并短句后批量 TTS，减少合成次数
 func (p *Pipeline) processQuery(ctx context.Context, query string) {
 	// 重置打断标志
 	p.interrupted.Store(false)
@@ -521,50 +524,16 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 			return
 		}
 
-		// 流式消费文本并 TTS
+		// 先缓冲完整回复，等流结束后再决定处理方式
 		var fullReply strings.Builder
-		var sentenceBuf strings.Builder
-		firstSentence := true
 
 		for chunk := range textCh {
-			// 检查打断
 			if p.interrupted.Load() {
 				for range resultCh {
 				}
 				return
 			}
-
 			fullReply.WriteString(chunk)
-			sentenceBuf.WriteString(chunk)
-
-			for {
-				sentence, rest, found := extractSentence(sentenceBuf.String())
-				if !found {
-					break
-				}
-				sentenceBuf.Reset()
-				sentenceBuf.WriteString(rest)
-
-				sentence = strings.TrimSpace(sentence)
-				if sentence == "" {
-					continue
-				}
-
-				if firstSentence {
-					p.state.Transition(StateSpeaking)
-					firstSentence = false
-				}
-
-				log.Printf("[pipeline] TTS 合成: %s", sentence)
-				p.speakText(ctx, sentence)
-
-				// 检查打断
-				if p.interrupted.Load() {
-					for range resultCh {
-					}
-					return
-				}
-			}
 		}
 
 		// 获取最终结果（包含可能的 tool_calls）
@@ -578,22 +547,32 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 			return
 		}
 
-		// 如果没有工具调用，处理剩余文本并结束
+		// 如果没有工具调用，合并短句后 TTS 播放
 		if len(result.ToolCalls) == 0 {
-			remainder := strings.TrimSpace(sentenceBuf.String())
-			if remainder != "" && !p.interrupted.Load() {
-				if firstSentence {
-					p.state.Transition(StateSpeaking)
+			replyText := strings.TrimSpace(fullReply.String())
+			if replyText != "" && !p.interrupted.Load() {
+				p.state.Transition(StateSpeaking)
+				// 合并短句为大段（每段最多 100 个字符），减少 TTS 次数
+				chunks := mergeSentences(replyText, 100)
+				for _, chunk := range chunks {
+					if chunk != "" && !p.interrupted.Load() {
+						log.Printf("[pipeline] TTS 合成: %s", chunk)
+						p.speakText(ctx, chunk)
+					}
 				}
-				log.Printf("[pipeline] TTS 合成剩余: %s", remainder)
-				p.speakText(ctx, remainder)
 			}
 			p.contextManager.Add("assistant", fullReply.String())
 			log.Printf("[pipeline] LLM 回复完成 (%d 字符)", fullReply.Len())
 			break
 		}
 
-		// 有工具调用 — 切回 Processing，执行工具，然后继续下一轮
+		// 有工具调用 — 丢弃前言文本（如"我来帮你查询..."）
+		preamble := strings.TrimSpace(fullReply.String())
+		if preamble != "" {
+			log.Printf("[pipeline] 检测到工具调用，丢弃前言文本: %s", preamble)
+		}
+
+		// 切回 Processing，执行工具
 		log.Printf("[pipeline] 第 %d 轮工具调用: %d 个工具", round+1, len(result.ToolCalls))
 		p.state.SetState(StateProcessing)
 
@@ -829,4 +808,54 @@ func extractSentence(text string) (string, string, bool) {
 		}
 	}
 	return "", text, false
+}
+
+// mergeSentences 将文本按句分割后合并为大段，每段不超过 maxChars 个字符。
+// 腾讯云 TTS 单次最大约 150 字符（中文），这里按 100 字符合并以留余量。
+func mergeSentences(text string, maxChars int) []string {
+	if maxChars <= 0 {
+		maxChars = 100
+	}
+
+	var chunks []string
+	var current strings.Builder
+	remaining := text
+
+	flush := func() {
+		s := strings.TrimSpace(current.String())
+		if s != "" {
+			chunks = append(chunks, s)
+		}
+		current.Reset()
+	}
+
+	for {
+		sentence, rest, found := extractSentence(remaining)
+		if !found {
+			if r := strings.TrimSpace(remaining); r != "" {
+				// 如果追加后超限，先刷出
+				if current.Len() > 0 && utf8.RuneCountInString(current.String())+utf8.RuneCountInString(r) > maxChars {
+					flush()
+				}
+				current.WriteString(r)
+			}
+			break
+		}
+		remaining = rest
+		sentence = strings.TrimSpace(sentence)
+		if sentence == "" {
+			continue
+		}
+
+		sentenceLen := utf8.RuneCountInString(sentence)
+		currentLen := utf8.RuneCountInString(current.String())
+
+		// 如果当前段追加后超限，先刷出当前段
+		if current.Len() > 0 && currentLen+sentenceLen > maxChars {
+			flush()
+		}
+		current.WriteString(sentence)
+	}
+	flush()
+	return chunks
 }
