@@ -48,6 +48,13 @@ dialog:
   interrupt_reply: "我在"  # 打断播放时的回复语，区别于唤醒回复
   listen_delay: 500  # 播放回复语后延迟进入监听的时间（毫秒），给用户反应时间
 
+voiceprint:
+  enabled: false
+  model_path: "./models/voiceprint/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+  threshold: 0.6
+  num_threads: 1
+  buffer_secs: 3.0
+
 tools:
   data_dir: "~/.pibuddy"
   weather:

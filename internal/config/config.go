@@ -18,7 +18,8 @@ type Config struct {
 	TTS            TTSConfig      `yaml:"tts"`
 	Tools          ToolsConfig    `yaml:"tools"`
 	Log            LogConfig      `yaml:"log"`
-	Dialog         DialogConfig   `yaml:"dialog"`
+	Dialog         DialogConfig     `yaml:"dialog"`
+	Voiceprint     VoiceprintConfig `yaml:"voiceprint"`
 }
 
 // DialogConfig 对话配置。
@@ -39,6 +40,15 @@ type DialogConfig struct {
 	// ListenDelay 播放回复语后延迟进入监听的时间（毫秒）。
 	// 给用户一点反应时间再开始监听，默认 500ms。
 	ListenDelay int `yaml:"listen_delay"`
+}
+
+// VoiceprintConfig 声纹识别配置。
+type VoiceprintConfig struct {
+	Enabled    bool    `yaml:"enabled"`
+	ModelPath  string  `yaml:"model_path"`
+	Threshold  float32 `yaml:"threshold"`
+	NumThreads int     `yaml:"num_threads"`
+	BufferSecs float32 `yaml:"buffer_secs"`
 }
 
 // AudioConfig 音频采集/播放配置。
@@ -199,6 +209,16 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Dialog.ListenDelay == 0 {
 		cfg.Dialog.ListenDelay = 500 // 默认 500ms
+	}
+
+	if cfg.Voiceprint.Threshold == 0 {
+		cfg.Voiceprint.Threshold = 0.6
+	}
+	if cfg.Voiceprint.NumThreads == 0 {
+		cfg.Voiceprint.NumThreads = 1
+	}
+	if cfg.Voiceprint.BufferSecs == 0 {
+		cfg.Voiceprint.BufferSecs = 3.0
 	}
 
 	if cfg.Tools.DataDir == "" {

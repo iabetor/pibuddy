@@ -106,3 +106,27 @@ func TestContextManager_Clear(t *testing.T) {
 		t.Errorf("expected system role, got %q", msgs[0].Role)
 	}
 }
+
+func TestContextManager_SetCurrentSpeaker(t *testing.T) {
+	cm := NewContextManager("sys", 5)
+
+	// 默认无说话人
+	msgs := cm.Messages()
+	if strings.Contains(msgs[0].Content, "当前对话用户") {
+		t.Errorf("should not contain speaker info by default, got %q", msgs[0].Content)
+	}
+
+	// 设置说话人
+	cm.SetCurrentSpeaker("小明")
+	msgs = cm.Messages()
+	if !strings.Contains(msgs[0].Content, "当前对话用户: 小明") {
+		t.Errorf("system prompt should contain speaker name, got %q", msgs[0].Content)
+	}
+
+	// 清空说话人
+	cm.SetCurrentSpeaker("")
+	msgs = cm.Messages()
+	if strings.Contains(msgs[0].Content, "当前对话用户") {
+		t.Errorf("should not contain speaker info after clearing, got %q", msgs[0].Content)
+	}
+}

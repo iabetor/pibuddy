@@ -8,9 +8,10 @@ import (
 // ContextManager 使用滑动窗口维护对话历史，
 // 在保持近期上下文的同时限制内存使用。
 type ContextManager struct {
-	systemPrompt string
-	maxHistory   int
-	messages     []Message
+	systemPrompt   string
+	maxHistory     int
+	messages       []Message
+	currentSpeaker string
 }
 
 // NewContextManager 创建对话上下文管理器。
@@ -22,6 +23,11 @@ func NewContextManager(systemPrompt string, maxHistory int) *ContextManager {
 		maxHistory:   maxHistory,
 		messages:     make([]Message, 0),
 	}
+}
+
+// SetCurrentSpeaker 设置当前说话人。空字符串表示未识别。
+func (cm *ContextManager) SetCurrentSpeaker(name string) {
+	cm.currentSpeaker = name
 }
 
 // Add 添加一条消息到对话历史。
@@ -80,6 +86,10 @@ func (cm *ContextManager) Messages() []Message {
 		weekdays[now.Weekday()],
 		now.Format("15:04"),
 	)
+
+	if cm.currentSpeaker != "" {
+		timeInfo += fmt.Sprintf("\n当前对话用户: %s", cm.currentSpeaker)
+	}
 
 	msgs := make([]Message, 0, 1+len(cm.messages))
 	msgs = append(msgs, Message{

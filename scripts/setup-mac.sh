@@ -39,7 +39,7 @@ download() {
 }
 
 # --- Create directories ---
-mkdir -p "${MODELS_DIR}"/{kws,vad,asr,piper}
+mkdir -p "${MODELS_DIR}"/{kws,vad,asr,piper,voiceprint}
 
 # --- Download sherpa-onnx models ---
 
@@ -107,6 +107,17 @@ if [ ! -f "${MODELS_DIR}/piper/zh_CN-huayan-medium.onnx" ]; then
     echo "Piper TTS model downloaded."
 else
     echo "Piper TTS model already exists, skipping."
+fi
+
+# 5. Speaker recognition model
+echo ""
+if [ ! -f "${MODELS_DIR}/voiceprint/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx" ]; then
+    download \
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx" \
+        "${MODELS_DIR}/voiceprint/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+    echo "Speaker recognition model downloaded."
+else
+    echo "Speaker recognition model already exists, skipping."
 fi
 
 # --- NeteaseCloudMusicApi (optional, for music playback) ---

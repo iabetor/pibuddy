@@ -27,6 +27,9 @@ func TestSetDefaults_EmptyConfig(t *testing.T) {
 		{"TTS.Engine", cfg.TTS.Engine, "tencent"},
 		{"TTS.Edge.Voice", cfg.TTS.Edge.Voice, "zh-CN-XiaoxiaoNeural"},
 		{"Log.Level", cfg.Log.Level, "info"},
+		{"Voiceprint.Threshold", cfg.Voiceprint.Threshold, float32(0.6)},
+		{"Voiceprint.NumThreads", cfg.Voiceprint.NumThreads, 1},
+		{"Voiceprint.BufferSecs", cfg.Voiceprint.BufferSecs, float32(3.0)},
 	}
 
 	for _, c := range checks {

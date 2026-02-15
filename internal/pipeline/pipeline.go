@@ -19,6 +19,7 @@ import (
 	"github.com/iabetor/pibuddy/internal/tools"
 	"github.com/iabetor/pibuddy/internal/tts"
 	"github.com/iabetor/pibuddy/internal/vad"
+	"github.com/iabetor/pibuddy/internal/voiceprint"
 	"github.com/iabetor/pibuddy/internal/wake"
 )
 
@@ -60,6 +61,12 @@ type Pipeline struct {
 
 	// 打断标志（跨 goroutine 通信，通知 processQuery 退出）
 	interrupted atomic.Bool
+
+	// 声纹识别
+	voiceprintMgr     *voiceprint.Manager
+	voiceprintBuf     []float32
+	voiceprintBufMu   sync.Mutex
+	voiceprintBufSize int // 目标缓冲大小 = BufferSecs * SampleRate
 }
 
 // New 根据配置创建并初始化完整的 Pipeline。
@@ -145,6 +152,17 @@ func New(cfg *config.Config) (*Pipeline, error) {
 		return nil, fmt.Errorf("初始化流式播放器失败: %w", err)
 	}
 	p.streamPlayer = streamPlayer
+
+	// 初始化声纹识别（可选，失败不阻止启动）
+	if cfg.Voiceprint.Enabled && cfg.Voiceprint.ModelPath != "" {
+		vpMgr, vpErr := voiceprint.NewManager(cfg.Voiceprint, cfg.Tools.DataDir)
+		if vpErr != nil {
+			log.Printf("[pipeline] 声纹识别初始化失败（已禁用）: %v", vpErr)
+		} else {
+			p.voiceprintMgr = vpMgr
+			p.voiceprintBufSize = int(cfg.Voiceprint.BufferSecs * float32(cfg.Audio.SampleRate))
+		}
+	}
 
 	log.Println("[pipeline] 所有组件初始化完成")
 	return p, nil
@@ -302,6 +320,13 @@ func (p *Pipeline) handleIdle(ctx context.Context, frame []float32) {
 		p.vadDetector.Reset()
 		p.recognizer.Reset()
 
+		// 初始化声纹缓冲区（唤醒后开始收集音频）
+		if p.voiceprintMgr != nil && p.voiceprintMgr.NumSpeakers() > 0 {
+			p.voiceprintBufMu.Lock()
+			p.voiceprintBuf = make([]float32, 0, p.voiceprintBufSize)
+			p.voiceprintBufMu.Unlock()
+		}
+
 		// 如果配置了唤醒回复语，先播放再进入监听
 		if p.cfg.Dialog.WakeReply != "" {
 			p.state.Transition(StateSpeaking)
@@ -411,6 +436,22 @@ func (p *Pipeline) playWakeReply(ctx context.Context) {
 
 // handleListening 同时将音频送入 VAD 和 ASR。
 func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
+	// 声纹缓冲：收集音频帧用于说话人识别
+	p.voiceprintBufMu.Lock()
+	if p.voiceprintBuf != nil && len(p.voiceprintBuf) < p.voiceprintBufSize {
+		p.voiceprintBuf = append(p.voiceprintBuf, frame...)
+		if len(p.voiceprintBuf) >= p.voiceprintBufSize {
+			buf := p.voiceprintBuf
+			p.voiceprintBuf = nil
+			p.voiceprintBufMu.Unlock()
+			go p.identifySpeaker(buf)
+		} else {
+			p.voiceprintBufMu.Unlock()
+		}
+	} else {
+		p.voiceprintBufMu.Unlock()
+	}
+
 	p.vadDetector.Feed(frame)
 	p.recognizer.Feed(frame)
 
@@ -428,6 +469,17 @@ func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
 		finalText := p.recognizer.GetResult()
 		p.recognizer.Reset()
 		p.vadDetector.Reset()
+
+		// 如果声纹缓冲区还在收集且已有足够数据（>1秒），也触发识别
+		p.voiceprintBufMu.Lock()
+		if p.voiceprintBuf != nil && len(p.voiceprintBuf) > p.cfg.Audio.SampleRate {
+			buf := p.voiceprintBuf
+			p.voiceprintBuf = nil
+			p.voiceprintBufMu.Unlock()
+			go p.identifySpeaker(buf)
+		} else {
+			p.voiceprintBufMu.Unlock()
+		}
 
 		if strings.TrimSpace(finalText) == "" {
 			// ASR 结果为空，继续监听，等待超时计时器触发
@@ -599,9 +651,31 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 	}
 }
 
+// identifySpeaker 异步识别说话人并注入 LLM 上下文。
+func (p *Pipeline) identifySpeaker(samples []float32) {
+	if p.voiceprintMgr == nil {
+		return
+	}
+	name, err := p.voiceprintMgr.Identify(samples)
+	if err != nil {
+		log.Printf("[pipeline] 声纹识别失败: %v", err)
+		return
+	}
+	if name != "" {
+		log.Printf("[pipeline] 声纹识别结果: %s", name)
+	}
+	p.contextManager.SetCurrentSpeaker(name)
+}
+
 // enterContinuousMode 进入连续对话模式。
 // 回复完成后不立即回到空闲，而是进入监听状态并启动超时计时器。
 func (p *Pipeline) enterContinuousMode() {
+	// 清空声纹状态
+	p.contextManager.SetCurrentSpeaker("")
+	p.voiceprintBufMu.Lock()
+	p.voiceprintBuf = nil
+	p.voiceprintBufMu.Unlock()
+
 	if p.cfg.Dialog.ContinuousTimeout <= 0 {
 		// 连续对话模式禁用，直接回到空闲
 		p.state.ForceIdle()
@@ -735,6 +809,9 @@ func (p *Pipeline) Close() {
 	}
 	if p.recognizer != nil {
 		p.recognizer.Close()
+	}
+	if p.voiceprintMgr != nil {
+		p.voiceprintMgr.Close()
 	}
 
 	log.Println("[pipeline] 已关闭")
