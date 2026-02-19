@@ -15,7 +15,7 @@ vad:
 
 asr:
   model_path: "./models/asr"
-  num_threads: 2
+  num_threads: 4  # 增加解码线程数，加速 decode，减少 buffer 积压
 
 llm:
   provider: "openai"

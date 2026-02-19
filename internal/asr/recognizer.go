@@ -64,10 +64,15 @@ func NewRecognizer(modelPath string, numThreads int) (*Recognizer, error) {
 	}, nil
 }
 
-// Feed 将音频样本送入识别流。
+// Feed 将音频样本送入识别流，并立即解码一帧。
 // 样本应为 16kHz float32 格式。
+// 注意：Feed 后立即调用 Decode，减少 circular buffer 积压，避免 Overflow 警告。
 func (r *Recognizer) Feed(samples []float32) {
 	r.stream.AcceptWaveform(16000, samples)
+	// 立即解码一帧，减少 buffer 积压
+	if r.recognizer.IsReady(r.stream) {
+		r.recognizer.Decode(r.stream)
+	}
 }
 
 // IsEndpoint 返回识别器是否检测到端点（即说话者已结束一句话）。
