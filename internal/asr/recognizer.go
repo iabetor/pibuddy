@@ -87,9 +87,12 @@ func (r *Recognizer) GetResult() string {
 
 // Reset 重置识别流状态，为处理新的语句做准备。
 // 在获取完一个端点的结果后应调用此方法。
+// 通过销毁旧 stream 并创建新 stream 来彻底清空内部 circular buffer，
+// 避免长时间运行后 sherpa-onnx circular-buffer Overflow 警告。
 func (r *Recognizer) Reset() {
 	if r.recognizer != nil && r.stream != nil {
-		r.recognizer.Reset(r.stream)
+		sherpa.DeleteOnlineStream(r.stream)
+		r.stream = sherpa.NewOnlineStream(r.recognizer)
 	}
 }
 

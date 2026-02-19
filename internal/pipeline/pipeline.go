@@ -56,6 +56,9 @@ type Pipeline struct {
 	// 流式播放器（音乐）
 	streamPlayer *audio.StreamPlayer
 
+	// 音乐播放列表
+	playlist *music.Playlist
+
 	// 连续对话超时
 	continuousTimer *time.Timer
 	continuousMu    sync.Mutex
@@ -261,14 +264,20 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 			logger.Warnf("[pipeline] 创建音乐历史存储失败: %v", err)
 		}
 
+		// 创建播放列表
+		p.playlist = music.NewPlaylist(musicProvider, musicHistory)
+
 		musicCfg := tools.MusicConfig{
 			Provider: musicProvider,
 			History:  musicHistory,
+			Playlist: p.playlist,
 			Enabled:  true,
 		}
 		p.toolRegistry.Register(tools.NewSearchMusicTool(musicCfg))
 		p.toolRegistry.Register(tools.NewPlayMusicTool(musicCfg))
 		p.toolRegistry.Register(tools.NewListMusicHistoryTool(musicHistory))
+		p.toolRegistry.Register(tools.NewNextMusicTool(p.playlist))
+		p.toolRegistry.Register(tools.NewSetPlayModeTool(p.playlist))
 	}
 
 	// RSS 订阅工具
@@ -716,7 +725,7 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 			})
 
 			// 检查是否是音乐播放结果
-			if tc.Function.Name == "play_music" {
+			if tc.Function.Name == "play_music" || tc.Function.Name == "next_music" {
 				var musicResult tools.MusicResult
 				if jsonErr := json.Unmarshal([]byte(toolResult), &musicResult); jsonErr == nil {
 					if musicResult.Success && musicResult.URL != "" {
@@ -869,7 +878,7 @@ func (p *Pipeline) interruptSpeak() {
 	}
 }
 
-// playMusic 播放音乐。
+// playMusic 播放音乐，播放结束后自动播放列表中的下一首。
 func (p *Pipeline) playMusic(ctx context.Context, url string) {
 	// 确保状态为 Speaking
 	if p.state.Current() != StateSpeaking {
@@ -880,9 +889,24 @@ func (p *Pipeline) playMusic(ctx context.Context, url string) {
 		if err != context.Canceled {
 			logger.Errorf("[pipeline] 音乐播放失败: %v", err)
 		}
+		// 被打断或出错，不自动下一首
+		p.enterContinuousMode()
+		return
 	}
 
-	// 播放完成后进入连续对话模式
+	// 播放正常完成，尝试自动播放下一首
+	if p.playlist != nil && p.playlist.HasNext() {
+		nextURL, songName, artist, ok := p.playlist.Next(ctx)
+		if ok {
+			logger.Infof("[pipeline] 自动切换下一首: %s - %s", artist, songName)
+			// 递归播放下一首（仍在同一个 goroutine 中）
+			p.playMusic(ctx, nextURL)
+			return
+		}
+	}
+
+	// 列表播完或无下一首，进入连续对话模式
+	logger.Info("[pipeline] 播放列表结束")
 	p.enterContinuousMode()
 }
 

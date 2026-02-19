@@ -39,6 +39,7 @@ func NewStreamPlayer(channels int) (*StreamPlayer, error) {
 }
 
 // Play 从 URL 流式下载并播放 MP3 音频。
+// 使用边下载边播放的流式架构，减少首次播放延迟。
 func (sp *StreamPlayer) Play(ctx context.Context, url string) error {
 	sp.mu.Lock()
 	if sp.closed {
@@ -55,24 +56,41 @@ func (sp *StreamPlayer) Play(ctx context.Context, url string) error {
 		sp.mu.Unlock()
 	}()
 
-	// 先完整下载音频到内存缓冲，支持网络中断重试
-	audioData, err := sp.downloadWithRetry(streamCtx, url)
-	if err != nil {
-		return fmt.Errorf("下载音频失败: %w", err)
+	// 创建流式缓冲，边下载边解码
+	sb := newStreamingBuffer()
+
+	// 后台下载 goroutine：将数据流式写入 streamingBuffer
+	go sp.streamDownload(streamCtx, url, sb)
+
+	// 等待至少 32KB 数据到达再初始化解码器（MP3 帧头 + 几帧数据）
+	waitStart := time.Now()
+	for sb.Len() < 32768 {
+		select {
+		case <-streamCtx.Done():
+			return streamCtx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+		// 如果下载已完成（可能文件很小），也跳出
+		sb.mu.Lock()
+		done := sb.finished
+		sb.mu.Unlock()
+		if done {
+			break
+		}
 	}
-	if len(audioData) == 0 {
+	if sb.Len() == 0 {
 		return nil
 	}
+	logger.Debugf("[audio] 等待首批数据: %d 字节, 耗时 %v", sb.Len(), time.Since(waitStart).Round(time.Millisecond))
 
-	// 解码 MP3
-	reader := newBytesReadSeeker(audioData)
-	decoder, err := mp3.NewDecoder(reader)
+	// 解码 MP3（streamingBuffer 实现了 io.ReadSeeker）
+	decoder, err := mp3.NewDecoder(sb)
 	if err != nil {
 		return fmt.Errorf("创建 MP3 解码器失败: %w", err)
 	}
 
 	sampleRate := decoder.SampleRate()
-	logger.Debugf("[audio] 流式播放: 采样率 %d Hz, 数据 %d 字节", sampleRate, len(audioData))
+	logger.Debugf("[audio] 流式播放: 采样率 %d Hz", sampleRate)
 
 	// 创建音频数据通道
 	chunkSize := sampleRate * 2 // 约 2 秒的样本数
@@ -80,7 +98,7 @@ func (sp *StreamPlayer) Play(ctx context.Context, url string) error {
 	sampleCh := make(chan []float32, bufferChunks)
 	errCh := make(chan error, 1)
 
-	// 生产者：后台解码（数据已在内存中，不会有网络错误）
+	// 生产者：后台解码（从 streamingBuffer 读取，会自动等待下载数据）
 	go func() {
 		defer close(sampleCh)
 
@@ -134,10 +152,10 @@ func (sp *StreamPlayer) Play(ctx context.Context, url string) error {
 		}
 	}()
 
-	// 预缓冲：等待至少 2 块数据
-	preBuffer := make([][]float32, 0, 2)
+	// 预缓冲：只等 1 块数据即可开始播放（降低延迟）
+	preBuffer := make([][]float32, 0, 1)
 preBufferLoop:
-	for len(preBuffer) < 2 {
+	for len(preBuffer) < 1 {
 		select {
 		case <-streamCtx.Done():
 			return streamCtx.Err()
@@ -148,13 +166,13 @@ preBufferLoop:
 				break preBufferLoop
 			}
 			preBuffer = append(preBuffer, chunk)
-			logger.Debugf("[audio] 预缓冲 %d/2", len(preBuffer))
+			logger.Debugf("[audio] 预缓冲 %d/1", len(preBuffer))
 		}
 	}
 	if len(preBuffer) == 0 {
 		return nil // 空文件
 	}
-	logger.Debugf("[audio] 预缓冲完成，开始播放")
+	logger.Debugf("[audio] 预缓冲完成，开始播放 (总延迟 %v)", time.Since(waitStart).Round(time.Millisecond))
 
 	// 合并预缓冲数据
 	var totalLen int
@@ -295,38 +313,42 @@ func isNetworkError(err error) bool {
 		strings.Contains(err.Error(), "broken pipe")
 }
 
-// downloadWithRetry 下载音频数据，支持网络中断后使用 Range 请求断点续传。
-func (sp *StreamPlayer) downloadWithRetry(ctx context.Context, url string) ([]byte, error) {
+// streamDownload 流式下载音频数据到 streamingBuffer，支持网络中断后断点续传。
+func (sp *StreamPlayer) streamDownload(ctx context.Context, url string, sb *streamingBuffer) {
 	const maxRetries = 3
-	var data []byte
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
-			return nil, fmt.Errorf("创建请求失败: %w", err)
+			sb.Finish(fmt.Errorf("创建请求失败: %w", err))
+			return
 		}
 
 		// 断点续传：从已下载的偏移量开始
-		if len(data) > 0 {
-			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", len(data)))
-			logger.Debugf("[audio] 断点续传: 从 %d 字节处继续下载 (第 %d 次重试)", len(data), attempt)
+		downloaded := sb.Len()
+		if downloaded > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", downloaded))
+			logger.Debugf("[audio] 断点续传: 从 %d 字节处继续下载 (第 %d 次重试)", downloaded, attempt)
 		}
 
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil, ctx.Err()
+				sb.Finish(ctx.Err())
+				return
 			}
 			if attempt < maxRetries {
 				logger.Debugf("[audio] 下载失败，%d 秒后重试: %v", attempt+1, err)
 				select {
 				case <-time.After(time.Duration(attempt+1) * time.Second):
 				case <-ctx.Done():
-					return nil, ctx.Err()
+					sb.Finish(ctx.Err())
+					return
 				}
 				continue
 			}
-			return nil, fmt.Errorf("下载音频失败: %w", err)
+			sb.Finish(fmt.Errorf("下载音频失败: %w", err))
+			return
 		}
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
@@ -336,86 +358,181 @@ func (sp *StreamPlayer) downloadWithRetry(ctx context.Context, url string) ([]by
 				select {
 				case <-time.After(time.Duration(attempt+1) * time.Second):
 				case <-ctx.Done():
-					return nil, ctx.Err()
+					sb.Finish(ctx.Err())
+					return
 				}
 				continue
 			}
-			return nil, fmt.Errorf("下载音频返回错误状态码: %d", resp.StatusCode)
+			sb.Finish(fmt.Errorf("下载音频返回错误状态码: %d", resp.StatusCode))
+			return
 		}
 
-		// 读取所有数据
-		chunk, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		data = append(data, chunk...)
-
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			if isNetworkError(err) && attempt < maxRetries {
-				logger.Debugf("[audio] 读取中断(%d 字节已下载)，%d 秒后重试: %v", len(data), attempt+1, err)
+		// 流式读取，每读一块就追加到 streamingBuffer
+		buf := make([]byte, 32768) // 32KB chunks
+		readErr := func() error {
+			defer resp.Body.Close()
+			for {
 				select {
-				case <-time.After(time.Duration(attempt+1) * time.Second):
 				case <-ctx.Done():
-					return nil, ctx.Err()
+					return ctx.Err()
+				default:
 				}
-				continue
+
+				n, err := resp.Body.Read(buf)
+				if n > 0 {
+					chunk := make([]byte, n)
+					copy(chunk, buf[:n])
+					sb.Append(chunk)
+				}
+				if err != nil {
+					if err == io.EOF {
+						return nil // 下载完成
+					}
+					return err
+				}
 			}
-			// 非网络错误或已耗尽重试次数，用已有数据继续
-			if len(data) > 0 {
-				logger.Debugf("[audio] 下载不完整(%d 字节)，使用已有数据: %v", len(data), err)
-				return data, nil
-			}
-			return nil, fmt.Errorf("下载音频失败: %w", err)
+		}()
+
+		if readErr == nil {
+			// 下载成功完成
+			logger.Debugf("[audio] 下载完成: %d 字节", sb.Len())
+			sb.Finish(nil)
+			return
 		}
 
-		// 下载成功
-		logger.Debugf("[audio] 下载完成: %d 字节", len(data))
-		return data, nil
+		if ctx.Err() != nil {
+			sb.Finish(ctx.Err())
+			return
+		}
+
+		if isNetworkError(readErr) && attempt < maxRetries {
+			logger.Debugf("[audio] 读取中断(%d 字节已下载)，%d 秒后重试: %v", sb.Len(), attempt+1, readErr)
+			select {
+			case <-time.After(time.Duration(attempt+1) * time.Second):
+			case <-ctx.Done():
+				sb.Finish(ctx.Err())
+				return
+			}
+			continue
+		}
+
+		// 非网络错误或重试耗尽
+		if sb.Len() > 0 {
+			logger.Debugf("[audio] 下载不完整(%d 字节)，使用已有数据: %v", sb.Len(), readErr)
+			sb.Finish(nil) // 已有数据可用
+			return
+		}
+		sb.Finish(fmt.Errorf("下载音频失败: %w", readErr))
+		return
 	}
 
-	// 重试耗尽，用已有数据
-	if len(data) > 0 {
-		logger.Debugf("[audio] 重试耗尽，使用已有数据: %d 字节", len(data))
-		return data, nil
+	// 重试耗尽
+	if sb.Len() > 0 {
+		logger.Debugf("[audio] 重试耗尽，使用已有数据: %d 字节", sb.Len())
+		sb.Finish(nil)
+	} else {
+		sb.Finish(fmt.Errorf("下载音频失败: 重试耗尽"))
 	}
-	return nil, fmt.Errorf("下载音频失败: 重试耗尽")
 }
 
-// bytesReadSeeker 将 []byte 包装成 io.ReadSeeker（mp3.NewDecoder 需要）。
-type bytesReadSeeker struct {
-	data []byte
-	pos  int
+// streamingBuffer 是一个边下载边可读的 io.ReadSeeker 实现。
+// HTTP 下载 goroutine 通过 Append 写入数据，Finish 标记下载完成。
+// go-mp3 解码器通过 Read/Seek 接口消费数据。
+// 当 Read 到达缓冲末尾但下载未完成时，会阻塞等待更多数据。
+type streamingBuffer struct {
+	mu       sync.Mutex
+	cond     *sync.Cond
+	data     []byte
+	pos      int
+	finished bool // 下载完成标记
+	err      error // 下载出错
 }
 
-func newBytesReadSeeker(data []byte) *bytesReadSeeker {
-	return &bytesReadSeeker{data: data}
+func newStreamingBuffer() *streamingBuffer {
+	sb := &streamingBuffer{}
+	sb.cond = sync.NewCond(&sb.mu)
+	return sb
 }
 
-func (b *bytesReadSeeker) Read(p []byte) (int, error) {
-	if b.pos >= len(b.data) {
-		return 0, io.EOF
+// Append 由下载 goroutine 调用，追加数据到缓冲。
+func (sb *streamingBuffer) Append(chunk []byte) {
+	sb.mu.Lock()
+	sb.data = append(sb.data, chunk...)
+	sb.mu.Unlock()
+	sb.cond.Broadcast()
+}
+
+// Finish 标记下载完成（正常或出错）。
+func (sb *streamingBuffer) Finish(err error) {
+	sb.mu.Lock()
+	sb.finished = true
+	sb.err = err
+	sb.mu.Unlock()
+	sb.cond.Broadcast()
+}
+
+// Len 返回当前已缓冲的数据长度。
+func (sb *streamingBuffer) Len() int {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return len(sb.data)
+}
+
+// Read 实现 io.Reader。读到缓冲末尾时，如果下载未完成则阻塞等待。
+func (sb *streamingBuffer) Read(p []byte) (int, error) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+
+	for {
+		// 有数据可读
+		if sb.pos < len(sb.data) {
+			n := copy(p, sb.data[sb.pos:])
+			sb.pos += n
+			return n, nil
+		}
+
+		// 没有数据了
+		if sb.finished {
+			if sb.err != nil {
+				return 0, sb.err
+			}
+			return 0, io.EOF
+		}
+
+		// 等待更多数据
+		sb.cond.Wait()
 	}
-	n := copy(p, b.data[b.pos:])
-	b.pos += n
-	return n, nil
 }
 
-func (b *bytesReadSeeker) Seek(offset int64, whence int) (int64, error) {
+// Seek 实现 io.Seeker。支持 go-mp3 解码器初始化时的 seek 操作。
+func (sb *streamingBuffer) Seek(offset int64, whence int) (int64, error) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+
 	var newPos int64
 	switch whence {
 	case io.SeekStart:
 		newPos = offset
 	case io.SeekCurrent:
-		newPos = int64(b.pos) + offset
+		newPos = int64(sb.pos) + offset
 	case io.SeekEnd:
-		newPos = int64(len(b.data)) + offset
+		// go-mp3 在初始化时用 SeekEnd 探测文件长度。
+		// 如果下载还没完成，需要等待足够长或者返回当前已有长度。
+		// 实际上 go-mp3 初始化只需要读几帧就能确定采样率，
+		// 所以返回当前长度即可。
+		if !sb.finished {
+			// 等到有足够数据（至少 16KB，足够 MP3 初始化）
+			for len(sb.data) < 16384 && !sb.finished {
+				sb.cond.Wait()
+			}
+		}
+		newPos = int64(len(sb.data)) + offset
 	default:
 		return 0, fmt.Errorf("invalid whence: %d", whence)
 	}
 	if newPos < 0 {
 		return 0, fmt.Errorf("negative position")
 	}
-	b.pos = int(newPos)
+	sb.pos = int(newPos)
 	return newPos, nil
 }

@@ -60,7 +60,7 @@ tts:
     model_path: "./models/piper/zh_CN-huayan-medium.onnx"
 
 log:
-  level: "info"
+  level: "debug"
   # file: "/var/log/pibuddy/pibuddy.log"  # 日志文件路径，注释掉则只输出到控制台
   max_size: 64      # 单个日志文件最大 64MB
   max_backups: 3    # 保留 3 个旧日志文件

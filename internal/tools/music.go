@@ -13,6 +13,7 @@ import (
 type MusicConfig struct {
 	Provider music.Provider
 	History  *music.HistoryStore
+	Playlist *music.Playlist
 	Enabled  bool
 }
 
@@ -128,6 +129,7 @@ func (t *SearchMusicTool) Execute(ctx context.Context, args json.RawMessage) (st
 type PlayMusicTool struct {
 	provider music.Provider
 	history  *music.HistoryStore
+	playlist *music.Playlist
 	enabled  bool
 }
 
@@ -135,6 +137,7 @@ func NewPlayMusicTool(cfg MusicConfig) *PlayMusicTool {
 	return &PlayMusicTool{
 		provider: cfg.Provider,
 		history:  cfg.History,
+		playlist: cfg.Playlist,
 		enabled:  cfg.Enabled,
 	}
 }
@@ -160,12 +163,13 @@ func (t *PlayMusicTool) Parameters() json.RawMessage {
 
 // MusicResult 音乐播放结果，供 Pipeline 解析。
 type MusicResult struct {
-	Success  bool   `json:"success"`
-	SongName string `json:"song_name,omitempty"`
-	Artist   string `json:"artist,omitempty"`
-	URL      string `json:"url,omitempty"`
-	Error    string `json:"error,omitempty"`
-	NeedsVIP bool   `json:"needs_vip,omitempty"`
+	Success      bool   `json:"success"`
+	SongName     string `json:"song_name,omitempty"`
+	Artist       string `json:"artist,omitempty"`
+	URL          string `json:"url,omitempty"`
+	Error        string `json:"error,omitempty"`
+	NeedsVIP     bool   `json:"needs_vip,omitempty"`
+	PlaylistSize int    `json:"playlist_size,omitempty"` // 播放列表中的总歌曲数
 }
 
 func (t *PlayMusicTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
@@ -188,8 +192,8 @@ func (t *PlayMusicTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		return "", fmt.Errorf("缺少 keyword 参数")
 	}
 
-	// 搜索歌曲（多取几首用于 fallback）
-	songs, err := t.provider.Search(ctx, params.Keyword, 5)
+	// 搜索歌曲（多取几首用于 fallback 和播放列表）
+	songs, err := t.provider.Search(ctx, params.Keyword, 10)
 	if err != nil {
 		result := MusicResult{
 			Success: false,
@@ -209,6 +213,10 @@ func (t *PlayMusicTool) Execute(ctx context.Context, args json.RawMessage) (stri
 	// 依次尝试获取播放 URL，跳过无版权 / VIP 歌曲
 	qqProvider, isQQ := t.provider.(music.QQProvider)
 
+	var firstURL string
+	var firstSong music.Song
+	var playlistItems []music.PlaylistItem
+
 	for i, song := range songs {
 		var songURL string
 		var urlErr error
@@ -225,38 +233,61 @@ func (t *PlayMusicTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		}
 
 		if urlErr != nil {
-			logger.Debugf("[music] 第 %d 首 %s - %s 无法播放: %v，尝试下一首", i+1, song.Name, song.Artist, urlErr)
+			logger.Debugf("[music] 第 %d 首 %s - %s 无法播放: %v，跳过", i+1, song.Name, song.Artist, urlErr)
 			continue
 		}
 
 		if songURL == "" {
-			logger.Debugf("[music] 第 %d 首 %s - %s URL 为空，尝试下一首", i+1, song.Name, song.Artist)
+			logger.Debugf("[music] 第 %d 首 %s - %s URL 为空，跳过", i+1, song.Name, song.Artist)
 			continue
 		}
 
-		// 找到可播放的歌曲
-		if t.history != nil {
-			if addErr := t.history.Add(song); addErr != nil {
-				logger.Debugf("[music] 保存播放历史失败: %v", addErr)
-			}
-		}
+		// 收集所有可播放的歌曲
+		playlistItems = append(playlistItems, music.PlaylistItem{
+			Song: song,
+			URL:  songURL,
+		})
 
-		result := MusicResult{
-			Success:  true,
-			SongName: song.Name,
-			Artist:   song.Artist,
-			URL:      songURL,
+		// 记录第一首可播放的
+		if firstURL == "" {
+			firstURL = songURL
+			firstSong = song
 		}
-		if i > 0 {
-			logger.Infof("[music] 前 %d 首无法播放，已自动切换到: %s - %s", i, song.Name, song.Artist)
+	}
+
+	if firstURL == "" {
+		// 所有候选歌曲都无法播放
+		result := MusicResult{
+			Success: false,
+			Error:   fmt.Sprintf("搜索到 %d 首歌曲，但均因版权限制无法播放", len(songs)),
 		}
 		return marshalResult(result)
 	}
 
-	// 所有候选歌曲都无法播放
+	// 将所有可播放歌曲放入播放列表
+	if t.playlist != nil && len(playlistItems) > 0 {
+		t.playlist.Replace(playlistItems)
+		// 调用 Next 让 playlist.current 指向第一首
+		t.playlist.Next(ctx)
+		logger.Infof("[music] 已将 %d 首歌曲加入播放列表", len(playlistItems))
+	}
+
+	// 记录播放历史
+	if t.history != nil {
+		if addErr := t.history.Add(firstSong); addErr != nil {
+			logger.Debugf("[music] 保存播放历史失败: %v", addErr)
+		}
+	}
+
 	result := MusicResult{
-		Success: false,
-		Error:   fmt.Sprintf("搜索到 %d 首歌曲，但均因版权限制无法播放", len(songs)),
+		Success:      true,
+		SongName:     firstSong.Name,
+		Artist:       firstSong.Artist,
+		URL:          firstURL,
+		PlaylistSize: len(playlistItems),
+	}
+	if len(playlistItems) > 1 {
+		logger.Infof("[music] 第一首: %s - %s，列表共 %d 首", firstSong.Name, firstSong.Artist, len(playlistItems))
 	}
 	return marshalResult(result)
 }
@@ -330,4 +361,115 @@ func (t *ListMusicHistoryTool) Execute(ctx context.Context, args json.RawMessage
 		result += fmt.Sprintf("%d. %s - %s (播放%d次, %s)\n", i+1, e.Name, e.Artist, e.PlayCount, e.PlayedAt)
 	}
 	return result, nil
+}
+
+// ---- NextMusicTool 切换下一首 ----
+
+// NextMusicTool 切换到播放列表中的下一首歌曲。
+type NextMusicTool struct {
+	playlist *music.Playlist
+}
+
+func NewNextMusicTool(playlist *music.Playlist) *NextMusicTool {
+	return &NextMusicTool{playlist: playlist}
+}
+
+func (t *NextMusicTool) Name() string { return "next_music" }
+
+func (t *NextMusicTool) Description() string {
+	return "切换到下一首歌。当用户说'下一首'、'换一首'、'跳过'等时使用。"
+}
+
+func (t *NextMusicTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {},
+		"required": []
+	}`)
+}
+
+func (t *NextMusicTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	if t.playlist == nil || t.playlist.Len() == 0 {
+		result := MusicResult{
+			Success: false,
+			Error:   "当前没有播放列表",
+		}
+		return marshalResult(result)
+	}
+
+	url, songName, artist, ok := t.playlist.Next(ctx)
+	if !ok {
+		result := MusicResult{
+			Success: false,
+			Error:   "播放列表已到末尾，没有更多歌曲了",
+		}
+		return marshalResult(result)
+	}
+
+	result := MusicResult{
+		Success:      true,
+		SongName:     songName,
+		Artist:       artist,
+		URL:          url,
+		PlaylistSize: t.playlist.Len(),
+	}
+	return marshalResult(result)
+}
+
+// ---- SetPlayModeTool 设置播放模式 ----
+
+type SetPlayModeTool struct {
+	playlist *music.Playlist
+}
+
+func NewSetPlayModeTool(playlist *music.Playlist) *SetPlayModeTool {
+	return &SetPlayModeTool{playlist: playlist}
+}
+
+func (t *SetPlayModeTool) Name() string { return "set_play_mode" }
+
+func (t *SetPlayModeTool) Description() string {
+	return "设置音乐播放模式。当用户说'单曲循环'、'列表循环'、'顺序播放'等时使用。"
+}
+
+func (t *SetPlayModeTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"mode": {
+				"type": "string",
+				"description": "播放模式: sequence(顺序播放), loop(列表循环), single(单曲循环)",
+				"enum": ["sequence", "loop", "single"]
+			}
+		},
+		"required": ["mode"]
+	}`)
+}
+
+func (t *SetPlayModeTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	if t.playlist == nil {
+		return `{"success":false,"message":"播放列表未初始化"}`, nil
+	}
+
+	var params struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("解析参数失败: %w", err)
+	}
+
+	var mode music.PlayMode
+	switch params.Mode {
+	case "sequence":
+		mode = music.PlayModeSequence
+	case "loop":
+		mode = music.PlayModeLoop
+	case "single":
+		mode = music.PlayModeSingle
+	default:
+		return `{"success":false,"message":"无效的播放模式，请选择 sequence/loop/single"}`, nil
+	}
+
+	t.playlist.SetMode(mode)
+	return fmt.Sprintf(`{"success":true,"message":"已切换为%s模式"}`, mode), nil
 }

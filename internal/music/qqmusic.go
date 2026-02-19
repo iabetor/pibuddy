@@ -17,6 +17,9 @@ import (
 	"github.com/iabetor/pibuddy/internal/logger"
 )
 
+// cookieMaxAge 是 QQ 音乐 cookie 的最大有效期（经验值，通常 3 天左右会过期）。
+const cookieMaxAge = 72 * time.Hour
+
 // QQMusicClient QQ音乐客户端。
 // 需要部署 QQMusicApi 服务：https://github.com/jsososo/QQMusicApi
 type QQMusicClient struct {
@@ -24,9 +27,11 @@ type QQMusicClient struct {
 	httpClient *http.Client
 	dataDir    string
 
-	cookieMu   sync.RWMutex
-	cookies    []http.Cookie
-	cookieTime time.Time
+	cookieMu       sync.RWMutex
+	cookies        []http.Cookie
+	cookieTime     time.Time
+	cookieFileTime time.Time // cookie 文件中的 updated_at
+	cookieWarned   bool      // 是否已经发过过期警告（避免重复刷屏）
 }
 
 // NewQQMusicClient 创建 QQ 音乐客户端。
@@ -48,7 +53,8 @@ func NewQQMusicClientWithDataDir(baseURL, dataDir string) *QQMusicClient {
 	}
 }
 
-// loadCookies 加载 QQ 音乐 cookie（带缓存，每分钟最多读取一次文件）
+// loadCookies 加载 QQ 音乐 cookie（带缓存，每分钟最多读取一次文件）。
+// 会检测 cookie 年龄，超过 cookieMaxAge 时打印警告日志。
 func (c *QQMusicClient) loadCookies() []http.Cookie {
 	c.cookieMu.RLock()
 	if len(c.cookies) > 0 && time.Since(c.cookieTime) < time.Minute {
@@ -69,16 +75,35 @@ func (c *QQMusicClient) loadCookies() []http.Cookie {
 	path := filepath.Join(c.dataDir, "qq_cookie.json")
 	content, err := os.ReadFile(path)
 	if err != nil {
+		if !c.cookieWarned {
+			logger.Warnf("[qqmusic] 未找到 cookie 文件 %s，请先运行 pibuddy-music qq login 登录", path)
+			c.cookieWarned = true
+		}
 		return nil
 	}
 
 	var data cookieFile
 	if err := json.Unmarshal(content, &data); err != nil {
+		logger.Warnf("[qqmusic] 解析 cookie 文件失败: %v", err)
 		return nil
 	}
 
 	c.cookies = data.Cookies
 	c.cookieTime = time.Now()
+	c.cookieFileTime = data.UpdatedAt
+
+	// 检测 cookie 年龄
+	if !data.UpdatedAt.IsZero() && time.Since(data.UpdatedAt) > cookieMaxAge {
+		age := time.Since(data.UpdatedAt).Round(time.Hour)
+		if !c.cookieWarned {
+			logger.Warnf("[qqmusic] QQ 音乐 cookie 已使用 %v，可能已过期，请运行 pibuddy-music qq login --web 重新登录", age)
+			c.cookieWarned = true
+		}
+	} else {
+		// cookie 被更新了（比如重新登录），重置警告标记
+		c.cookieWarned = false
+	}
+
 	return c.cookies
 }
 
@@ -101,6 +126,20 @@ func (c *QQMusicClient) doRequest(req *http.Request) (*http.Response, error) {
 		req.Header.Set("Cookie", cookie)
 	}
 	return c.httpClient.Do(req)
+}
+
+// cookieExpiredHint 返回 cookie 过期提示信息（附在错误末尾），如果 cookie 正常则返回空字符串。
+func (c *QQMusicClient) cookieExpiredHint() string {
+	c.cookieMu.RLock()
+	defer c.cookieMu.RUnlock()
+
+	if len(c.cookies) == 0 {
+		return "（未登录，请运行 pibuddy-music qq login --web 登录）"
+	}
+	if !c.cookieFileTime.IsZero() && time.Since(c.cookieFileTime) > cookieMaxAge {
+		return "（cookie 可能已过期，请运行 pibuddy-music qq login --web 重新登录）"
+	}
+	return ""
 }
 
 // qqSearchResult 搜索结果。
@@ -159,7 +198,8 @@ func (c *QQMusicClient) Search(ctx context.Context, keyword string, limit int) (
 	}
 
 	if result.Result != 100 {
-		return nil, fmt.Errorf("QQ 音乐 API 返回错误: result=%d", result.Result)
+		hint := c.cookieExpiredHint()
+		return nil, fmt.Errorf("QQ 音乐 API 返回错误: result=%d%s", result.Result, hint)
 	}
 
 	// 转换为统一格式
@@ -219,7 +259,8 @@ func (c *QQMusicClient) GetSongURL(ctx context.Context, songID int64) (string, e
 	}
 
 	if result.Result != 100 {
-		return "", fmt.Errorf("QQ 音乐 API 返回错误: result=%d", result.Result)
+		hint := c.cookieExpiredHint()
+		return "", fmt.Errorf("QQ 音乐 API 返回错误: result=%d%s", result.Result, hint)
 	}
 
 	if result.Data == "" {
@@ -256,7 +297,8 @@ func (c *QQMusicClient) GetSongURLWithMID(ctx context.Context, songID int64, son
 	}
 
 	if result.Result != 100 {
-		return "", fmt.Errorf("QQ 音乐 API 返回错误: result=%d", result.Result)
+		hint := c.cookieExpiredHint()
+		return "", fmt.Errorf("QQ 音乐 API 返回错误: result=%d%s", result.Result, hint)
 	}
 
 	if result.Data == "" {

@@ -62,7 +62,8 @@ func getDefaultDataDir() string {
 
 // cookieFile 保存的 cookie 数据
 type cookieFile struct {
-	Cookies []http.Cookie `json:"cookies"`
+	Cookies   []http.Cookie `json:"cookies"`
+	UpdatedAt time.Time     `json:"updated_at,omitempty"`
 }
 
 // loadCookies 加载 cookie（带缓存，每分钟最多读取一次文件）
