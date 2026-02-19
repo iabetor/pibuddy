@@ -138,6 +138,15 @@ type ToolsConfig struct {
 	Translate     TranslateConfig     `yaml:"translate"`
 	HomeAssistant HomeAssistantConfig `yaml:"home_assistant"`
 	Health        HealthConfig        `yaml:"health"`
+	Ezviz         EzvizConfig         `yaml:"ezviz"`
+}
+
+// EzvizConfig 萤石开放平台配置。
+type EzvizConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	AppKey       string `yaml:"app_key"`
+	AppSecret    string `yaml:"app_secret"`
+	DeviceSerial string `yaml:"device_serial"` // 默认门锁序列号
 }
 
 // HealthConfig 健康提醒配置。

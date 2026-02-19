@@ -415,6 +415,15 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 		logger.Info("[pipeline] Home Assistant 智能家居工具已启用")
 	}
 
+	// 萤石门锁工具
+	if cfg.Tools.Ezviz.Enabled && cfg.Tools.Ezviz.AppKey != "" {
+		ezvizClient := tools.NewEzvizClient(cfg.Tools.Ezviz.AppKey, cfg.Tools.Ezviz.AppSecret)
+		p.toolRegistry.Register(tools.NewEzvizListDevicesTool(ezvizClient))
+		p.toolRegistry.Register(tools.NewEzvizGetLockStatusTool(ezvizClient, cfg.Tools.Ezviz.DeviceSerial))
+		p.toolRegistry.Register(tools.NewEzvizOpenDoorTool(ezvizClient, cfg.Tools.Ezviz.DeviceSerial))
+		logger.Info("[pipeline] 萤石门锁工具已启用")
+	}
+
 	// 系统状态工具
 	p.toolRegistry.Register(tools.NewSystemStatusTool())
 
