@@ -53,6 +53,9 @@ func NewQQMusicClientWithDataDir(baseURL, dataDir string) *QQMusicClient {
 	}
 }
 
+// ProviderName 返回提供者名称。
+func (c *QQMusicClient) ProviderName() string { return "qq" }
+
 // loadCookies 加载 QQ 音乐 cookie（带缓存，每分钟最多读取一次文件）。
 // 会检测 cookie 年龄，超过 cookieMaxAge 时打印警告日志。
 func (c *QQMusicClient) loadCookies() []http.Cookie {

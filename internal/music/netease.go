@@ -47,6 +47,9 @@ func NewNeteaseClientWithDataDir(baseURL, dataDir string) *NeteaseClient {
 	}
 }
 
+// ProviderName 返回提供者名称。
+func (c *NeteaseClient) ProviderName() string { return "netease" }
+
 func getDefaultDataDir() string {
 	dataDir := os.Getenv("PIBUDDY_DATA_DIR")
 	if dataDir == "" {

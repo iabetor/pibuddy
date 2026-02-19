@@ -21,6 +21,8 @@ func (m *mockProvider) GetSongURL(ctx context.Context, songID int64) (string, er
 	return "", nil
 }
 
+func (m *mockProvider) ProviderName() string { return "mock" }
+
 func newTestPlaylist() *Playlist {
 	provider := &mockProvider{
 		urls: map[int64]string{
@@ -43,23 +45,23 @@ func TestPlaylist_SequenceMode(t *testing.T) {
 	ctx := context.Background()
 
 	// 应该按顺序播放 3 首
-	url, name, _, ok := pl.Next(ctx)
+	url, name, _, _, ok := pl.Next(ctx)
 	if !ok || url != "http://example.com/song1.mp3" || name != "歌曲1" {
 		t.Fatalf("第1首: ok=%v, url=%s, name=%s", ok, url, name)
 	}
 
-	url, name, _, ok = pl.Next(ctx)
+	url, name, _, _, ok = pl.Next(ctx)
 	if !ok || url != "http://example.com/song2.mp3" || name != "歌曲2" {
 		t.Fatalf("第2首: ok=%v, url=%s, name=%s", ok, url, name)
 	}
 
-	url, name, _, ok = pl.Next(ctx)
+	url, name, _, _, ok = pl.Next(ctx)
 	if !ok || url != "http://example.com/song3.mp3" || name != "歌曲3" {
 		t.Fatalf("第3首: ok=%v, url=%s, name=%s", ok, url, name)
 	}
 
 	// 到末尾应该没有下一首
-	_, _, _, ok = pl.Next(ctx)
+	_, _, _, _, ok = pl.Next(ctx)
 	if ok {
 		t.Fatal("顺序播放到末尾应返回 ok=false")
 	}
@@ -79,7 +81,7 @@ func TestPlaylist_LoopMode(t *testing.T) {
 	pl.Next(ctx) // 歌曲1
 	pl.Next(ctx) // 歌曲2
 
-	url, name, _, ok := pl.Next(ctx) // 应该回到歌曲1
+	url, name, _, _, ok := pl.Next(ctx) // 应该回到歌曲1
 	if !ok || url != "http://example.com/song1.mp3" || name != "歌曲1" {
 		t.Fatalf("循环模式第3次: ok=%v, url=%s, name=%s", ok, url, name)
 	}
@@ -97,12 +99,12 @@ func TestPlaylist_SingleMode(t *testing.T) {
 
 	// 单曲循环应该一直播放同一首
 	pl.Next(ctx) // 歌曲1
-	url, name, _, ok := pl.Next(ctx)
+	url, name, _, _, ok := pl.Next(ctx)
 	if !ok || url != "http://example.com/song1.mp3" || name != "歌曲1" {
 		t.Fatalf("单曲循环第2次: ok=%v, url=%s, name=%s", ok, url, name)
 	}
 
-	url, name, _, ok = pl.Next(ctx)
+	url, name, _, _, ok = pl.Next(ctx)
 	if !ok || url != "http://example.com/song1.mp3" || name != "歌曲1" {
 		t.Fatalf("单曲循环第3次: ok=%v, url=%s, name=%s", ok, url, name)
 	}
@@ -137,7 +139,7 @@ func TestPlaylist_EmptyList(t *testing.T) {
 	pl := newTestPlaylist()
 	ctx := context.Background()
 
-	_, _, _, ok := pl.Next(ctx)
+	_, _, _, _, ok := pl.Next(ctx)
 	if ok {
 		t.Fatal("空列表应返回 ok=false")
 	}

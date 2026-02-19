@@ -25,6 +25,8 @@ func (m *MockProvider) GetSongURL(ctx context.Context, songID int64) (string, er
 	return m.urlResult, m.urlErr
 }
 
+func (m *MockProvider) ProviderName() string { return "mock" }
+
 func TestSearchMusicTool_Execute(t *testing.T) {
 	tests := []struct {
 		name       string

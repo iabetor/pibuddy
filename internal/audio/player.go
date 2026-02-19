@@ -55,8 +55,8 @@ func (p *Player) Play(ctx context.Context, samples []float32, sampleRate int) er
 	deviceConfig.Playback.Format = malgo.FormatS16
 	deviceConfig.Playback.Channels = p.channels
 	deviceConfig.SampleRate = uint32(sampleRate) // 使用音频实际采样率
-	deviceConfig.PeriodSizeInFrames = 512
-	deviceConfig.Periods = 2
+	deviceConfig.PeriodSizeInFrames = 4096       // 较大缓冲区，防止 CPU 繁忙时 underrun 导致卡顿
+	deviceConfig.Periods = 3
 
 	callbacks := malgo.DeviceCallbacks{
 		Data: func(outputSamples, inputSamples []byte, frameCount uint32) {

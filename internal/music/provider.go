@@ -18,6 +18,9 @@ type Provider interface {
 
 	// GetSongURL 获取歌曲播放地址。
 	GetSongURL(ctx context.Context, songID int64) (string, error)
+
+	// ProviderName 返回提供者名称（如 "qq"、"netease"）。
+	ProviderName() string
 }
 
 // QQProvider 扩展接口，支持使用 mid 获取 URL。

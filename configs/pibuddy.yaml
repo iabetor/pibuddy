@@ -93,6 +93,8 @@ tools:
   music:
     enabled: true
     provider: "qq"  # netease 或 qq
+    cache_dir: ""        # 缓存目录，默认 {data_dir}/music_cache
+    cache_max_size: 500  # 缓存最大大小（MB），0 表示禁用缓存
     # 网易云音乐
     netease:
       api_url: "http://localhost:3000"  # NeteaseCloudMusicApi 地址

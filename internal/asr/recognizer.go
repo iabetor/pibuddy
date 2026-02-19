@@ -75,10 +75,11 @@ func (r *Recognizer) IsEndpoint() bool {
 	return r.recognizer.IsEndpoint(r.stream)
 }
 
-// GetResult 解码待处理帧并返回当前识别文本。
+// GetResult 解码所有待处理帧并返回当前识别文本。
+// 循环调用 Decode 直到没有待处理帧，防止 circular buffer 因积压而 Overflow。
 // 如果还没有识别到任何内容，返回空字符串。
 func (r *Recognizer) GetResult() string {
-	if r.recognizer.IsReady(r.stream) {
+	for r.recognizer.IsReady(r.stream) {
 		r.recognizer.Decode(r.stream)
 	}
 	result := r.recognizer.GetResult(r.stream)

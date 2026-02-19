@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -55,6 +56,9 @@ type Pipeline struct {
 
 	// 流式播放器（音乐）
 	streamPlayer *audio.StreamPlayer
+
+	// 音乐缓存
+	musicCache *audio.MusicCache
 
 	// 音乐播放列表
 	playlist *music.Playlist
@@ -264,6 +268,16 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 			logger.Warnf("[pipeline] 创建音乐历史存储失败: %v", err)
 		}
 
+		// 创建音乐缓存
+		var musicCache *audio.MusicCache
+		musicCache, err = audio.NewMusicCache(cfg.Tools.Music.CacheDir, cfg.Tools.Music.CacheMaxSize)
+		if err != nil {
+			logger.Warnf("[pipeline] 创建音乐缓存失败（缓存已禁用）: %v", err)
+		} else if musicCache.Enabled() {
+			logger.Infof("[pipeline] 音乐缓存已启用: %s (上限 %dMB)", cfg.Tools.Music.CacheDir, cfg.Tools.Music.CacheMaxSize)
+		}
+		p.musicCache = musicCache
+
 		// 创建播放列表
 		p.playlist = music.NewPlaylist(musicProvider, musicHistory)
 
@@ -271,6 +285,7 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 			Provider: musicProvider,
 			History:  musicHistory,
 			Playlist: p.playlist,
+			Cache:    musicCache,
 			Enabled:  true,
 		}
 		p.toolRegistry.Register(tools.NewSearchMusicTool(musicCfg))
@@ -278,6 +293,10 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 		p.toolRegistry.Register(tools.NewListMusicHistoryTool(musicHistory))
 		p.toolRegistry.Register(tools.NewNextMusicTool(p.playlist))
 		p.toolRegistry.Register(tools.NewSetPlayModeTool(p.playlist))
+		if musicCache != nil && musicCache.Enabled() {
+			p.toolRegistry.Register(tools.NewListMusicCacheTool(musicCache))
+			p.toolRegistry.Register(tools.NewDeleteMusicCacheTool(musicCache))
+		}
 	}
 
 	// RSS 订阅工具
@@ -730,10 +749,10 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 			if tc.Function.Name == "play_music" || tc.Function.Name == "next_music" {
 				var musicResult tools.MusicResult
 				if jsonErr := json.Unmarshal([]byte(toolResult), &musicResult); jsonErr == nil {
-					if musicResult.Success && musicResult.URL != "" {
+					if musicResult.Success && (musicResult.URL != "" || musicResult.CacheKey != "") {
 						// 播放音乐
 						logger.Infof("[pipeline] 开始播放音乐: %s - %s", musicResult.Artist, musicResult.SongName)
-						p.playMusic(ctx, musicResult.URL)
+						p.playMusic(ctx, musicResult.URL, musicResult.CacheKey)
 						// 音乐播放结束后继续
 						return
 					}
@@ -887,13 +906,22 @@ func (p *Pipeline) interruptSpeak() {
 }
 
 // playMusic 播放音乐，播放结束后自动播放列表中的下一首。
-func (p *Pipeline) playMusic(ctx context.Context, url string) {
+func (p *Pipeline) playMusic(ctx context.Context, url string, cacheKey string) {
 	// 确保状态为 Speaking
 	if p.state.Current() != StateSpeaking {
 		p.state.SetState(StateSpeaking)
 	}
 
-	if err := p.streamPlayer.Play(ctx, url); err != nil {
+	// 构建播放选项
+	var opts *audio.PlayOptions
+	if cacheKey != "" && p.musicCache != nil {
+		opts = &audio.PlayOptions{
+			CacheKey: cacheKey,
+			Cache:    p.musicCache,
+		}
+	}
+
+	if err := p.streamPlayer.Play(ctx, url, opts); err != nil {
 		if err != context.Canceled {
 			logger.Errorf("[pipeline] 音乐播放失败: %v", err)
 		}
@@ -902,13 +930,31 @@ func (p *Pipeline) playMusic(ctx context.Context, url string) {
 		return
 	}
 
+	// 播放完成，更新缓存索引（如果走了网络下载路径）
+	if opts != nil && p.musicCache != nil && p.musicCache.Enabled() && cacheKey != "" {
+		// 检查缓存文件是否存在（下载完成后会 commit）
+		filePath := p.musicCache.FilePath(cacheKey)
+		if _, err := os.Stat(filePath); err == nil {
+			// 从 playlist 获取当前歌曲信息来更新索引
+			if item := p.playlist.Current(); item != nil {
+				p.musicCache.Store(cacheKey, audio.CacheEntry{
+					ID:       item.Song.ID,
+					Name:     item.Song.Name,
+					Artist:   item.Song.Artist,
+					Album:    item.Song.Album,
+					Provider: cacheKey[:strings.Index(cacheKey, "_")],
+				})
+			}
+		}
+	}
+
 	// 播放正常完成，尝试自动播放下一首
 	if p.playlist != nil && p.playlist.HasNext() {
-		nextURL, songName, artist, ok := p.playlist.Next(ctx)
+		nextURL, songName, artist, nextCacheKey, ok := p.playlist.Next(ctx)
 		if ok {
 			logger.Infof("[pipeline] 自动切换下一首: %s - %s", artist, songName)
 			// 递归播放下一首（仍在同一个 goroutine 中）
-			p.playMusic(ctx, nextURL)
+			p.playMusic(ctx, nextURL, nextCacheKey)
 			return
 		}
 	}

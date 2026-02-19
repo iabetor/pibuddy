@@ -133,10 +133,12 @@ type RSSConfig struct {
 
 // MusicConfig 音乐服务配置。
 type MusicConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	Provider string `yaml:"provider"` // netease 或 qq
-	APIURL   string `yaml:"api_url"`  // 兼容旧配置
-	Netease  struct {
+	Enabled      bool   `yaml:"enabled"`
+	Provider     string `yaml:"provider"`       // netease 或 qq
+	APIURL       string `yaml:"api_url"`         // 兼容旧配置
+	CacheDir     string `yaml:"cache_dir"`       // 缓存目录，默认 {DataDir}/music_cache
+	CacheMaxSize int64  `yaml:"cache_max_size"`  // 缓存最大大小（MB），默认 500，0 表示禁用缓存
+	Netease      struct {
 		APIURL string `yaml:"api_url"` // 网易云 API 地址
 	} `yaml:"netease"`
 	QQ struct {
@@ -262,6 +264,19 @@ func setDefaults(cfg *Config) {
 		if home != "" {
 			cfg.Tools.DataDir = home + cfg.Tools.DataDir[1:]
 		}
+	}
+
+	// 音乐缓存默认值
+	if cfg.Tools.Music.CacheDir == "" {
+		cfg.Tools.Music.CacheDir = cfg.Tools.DataDir + "/music_cache"
+	} else if strings.HasPrefix(cfg.Tools.Music.CacheDir, "~/") {
+		home, _ := os.UserHomeDir()
+		if home != "" {
+			cfg.Tools.Music.CacheDir = home + cfg.Tools.Music.CacheDir[1:]
+		}
+	}
+	if cfg.Tools.Music.CacheMaxSize == 0 {
+		cfg.Tools.Music.CacheMaxSize = 500 // 默认 500MB
 	}
 
 	// 去除 API Key 两端可能的空白（环境变量展开后常见）

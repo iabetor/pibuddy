@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/iabetor/pibuddy/internal/audio"
 	"github.com/iabetor/pibuddy/internal/logger"
 	"github.com/iabetor/pibuddy/internal/music"
 )
@@ -14,6 +15,7 @@ type MusicConfig struct {
 	Provider music.Provider
 	History  *music.HistoryStore
 	Playlist *music.Playlist
+	Cache    *audio.MusicCache
 	Enabled  bool
 }
 
@@ -130,6 +132,7 @@ type PlayMusicTool struct {
 	provider music.Provider
 	history  *music.HistoryStore
 	playlist *music.Playlist
+	cache    *audio.MusicCache
 	enabled  bool
 }
 
@@ -138,6 +141,7 @@ func NewPlayMusicTool(cfg MusicConfig) *PlayMusicTool {
 		provider: cfg.Provider,
 		history:  cfg.History,
 		playlist: cfg.Playlist,
+		cache:    cfg.Cache,
 		enabled:  cfg.Enabled,
 	}
 }
@@ -167,6 +171,7 @@ type MusicResult struct {
 	SongName     string `json:"song_name,omitempty"`
 	Artist       string `json:"artist,omitempty"`
 	URL          string `json:"url,omitempty"`
+	CacheKey     string `json:"cache_key,omitempty"`    // 缓存标识，如 "qq_12345678"
 	Error        string `json:"error,omitempty"`
 	NeedsVIP     bool   `json:"needs_vip,omitempty"`
 	PlaylistSize int    `json:"playlist_size,omitempty"` // 播放列表中的总歌曲数
@@ -192,7 +197,53 @@ func (t *PlayMusicTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		return "", fmt.Errorf("缺少 keyword 参数")
 	}
 
-	// 搜索歌曲（多取几首用于 fallback 和播放列表）
+	// 1. 先查本地缓存（离线优先）
+	if t.cache != nil && t.cache.Enabled() {
+		cachedItems := t.cache.Search(params.Keyword)
+		if len(cachedItems) > 0 {
+			logger.Infof("[music] 缓存命中 %d 首: %s", len(cachedItems), params.Keyword)
+
+			var playlistItems []music.PlaylistItem
+			for _, ci := range cachedItems {
+				cacheKey := fmt.Sprintf("%s_%d", ci.Provider, ci.ID)
+				playlistItems = append(playlistItems, music.PlaylistItem{
+					Song: music.Song{
+						ID:     ci.ID,
+						Name:   ci.Name,
+						Artist: ci.Artist,
+						Album:  ci.Album,
+					},
+					URL:      "", // 从缓存播放不需要 URL
+					CacheKey: cacheKey,
+				})
+			}
+
+			firstItem := playlistItems[0]
+			firstCacheKey := firstItem.CacheKey
+
+			if t.playlist != nil && len(playlistItems) > 0 {
+				t.playlist.Replace(playlistItems)
+				t.playlist.Next(ctx)
+			}
+
+			if t.history != nil {
+				if addErr := t.history.Add(firstItem.Song); addErr != nil {
+					logger.Debugf("[music] 保存播放历史失败: %v", addErr)
+				}
+			}
+
+			result := MusicResult{
+				Success:      true,
+				SongName:     firstItem.Song.Name,
+				Artist:       firstItem.Song.Artist,
+				CacheKey:     firstCacheKey,
+				PlaylistSize: len(playlistItems),
+			}
+			return marshalResult(result)
+		}
+	}
+
+	// 2. 缓存未命中，走原有的网络搜索流程
 	songs, err := t.provider.Search(ctx, params.Keyword, 10)
 	if err != nil {
 		result := MusicResult{
@@ -210,11 +261,14 @@ func (t *PlayMusicTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		return marshalResult(result)
 	}
 
+	providerName := t.provider.ProviderName()
+
 	// 依次尝试获取播放 URL，跳过无版权 / VIP 歌曲
 	qqProvider, isQQ := t.provider.(music.QQProvider)
 
 	var firstURL string
 	var firstSong music.Song
+	var firstCacheKey string
 	var playlistItems []music.PlaylistItem
 
 	for i, song := range songs {
@@ -242,21 +296,22 @@ func (t *PlayMusicTool) Execute(ctx context.Context, args json.RawMessage) (stri
 			continue
 		}
 
-		// 收集所有可播放的歌曲
+		cacheKey := fmt.Sprintf("%s_%d", providerName, song.ID)
+
 		playlistItems = append(playlistItems, music.PlaylistItem{
-			Song: song,
-			URL:  songURL,
+			Song:     song,
+			URL:      songURL,
+			CacheKey: cacheKey,
 		})
 
-		// 记录第一首可播放的
 		if firstURL == "" {
 			firstURL = songURL
 			firstSong = song
+			firstCacheKey = cacheKey
 		}
 	}
 
 	if firstURL == "" {
-		// 所有候选歌曲都无法播放
 		result := MusicResult{
 			Success: false,
 			Error:   fmt.Sprintf("搜索到 %d 首歌曲，但均因版权限制无法播放", len(songs)),
@@ -267,7 +322,6 @@ func (t *PlayMusicTool) Execute(ctx context.Context, args json.RawMessage) (stri
 	// 将所有可播放歌曲放入播放列表
 	if t.playlist != nil && len(playlistItems) > 0 {
 		t.playlist.Replace(playlistItems)
-		// 调用 Next 让 playlist.current 指向第一首
 		t.playlist.Next(ctx)
 		logger.Infof("[music] 已将 %d 首歌曲加入播放列表", len(playlistItems))
 	}
@@ -284,6 +338,7 @@ func (t *PlayMusicTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		SongName:     firstSong.Name,
 		Artist:       firstSong.Artist,
 		URL:          firstURL,
+		CacheKey:     firstCacheKey,
 		PlaylistSize: len(playlistItems),
 	}
 	if len(playlistItems) > 1 {
@@ -397,7 +452,7 @@ func (t *NextMusicTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		return marshalResult(result)
 	}
 
-	url, songName, artist, ok := t.playlist.Next(ctx)
+	url, songName, artist, cacheKey, ok := t.playlist.Next(ctx)
 	if !ok {
 		result := MusicResult{
 			Success: false,
@@ -411,6 +466,7 @@ func (t *NextMusicTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		SongName:     songName,
 		Artist:       artist,
 		URL:          url,
+		CacheKey:     cacheKey,
 		PlaylistSize: t.playlist.Len(),
 	}
 	return marshalResult(result)
@@ -472,4 +528,105 @@ func (t *SetPlayModeTool) Execute(ctx context.Context, args json.RawMessage) (st
 
 	t.playlist.SetMode(mode)
 	return fmt.Sprintf(`{"success":true,"message":"已切换为%s模式"}`, mode), nil
+}
+
+// ---- ListMusicCacheTool 查看缓存列表 ----
+
+type ListMusicCacheTool struct {
+	cache *audio.MusicCache
+}
+
+func NewListMusicCacheTool(cache *audio.MusicCache) *ListMusicCacheTool {
+	return &ListMusicCacheTool{cache: cache}
+}
+
+func (t *ListMusicCacheTool) Name() string { return "list_music_cache" }
+
+func (t *ListMusicCacheTool) Description() string {
+	return "查看本地缓存的音乐列表。当用户说'缓存了哪些歌'、'本地有什么歌'等时使用。"
+}
+
+func (t *ListMusicCacheTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {},
+		"required": []
+	}`)
+}
+
+func (t *ListMusicCacheTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	if t.cache == nil || !t.cache.Enabled() {
+		return `{"success":false,"message":"音乐缓存未启用"}`, nil
+	}
+
+	entries := t.cache.List()
+	if len(entries) == 0 {
+		return `{"success":true,"message":"缓存为空，还没有缓存任何歌曲"}`, nil
+	}
+
+	result := fmt.Sprintf("本地缓存了 %d 首歌曲:\n", len(entries))
+	for i, e := range entries {
+		sizeKB := e.Size / 1024
+		result += fmt.Sprintf("%d. %s - %s (%s, %dKB)\n", i+1, e.Name, e.Artist, e.Album, sizeKB)
+	}
+	return result, nil
+}
+
+// ---- DeleteMusicCacheTool 删除缓存音乐 ----
+
+type DeleteMusicCacheTool struct {
+	cache *audio.MusicCache
+}
+
+func NewDeleteMusicCacheTool(cache *audio.MusicCache) *DeleteMusicCacheTool {
+	return &DeleteMusicCacheTool{cache: cache}
+}
+
+func (t *DeleteMusicCacheTool) Name() string { return "delete_music_cache" }
+
+func (t *DeleteMusicCacheTool) Description() string {
+	return "删除本地缓存的音乐。支持按关键词匹配歌名或歌手名，可选排除某些歌手。当用户说'删除缓存的某某歌'等时使用。"
+}
+
+func (t *DeleteMusicCacheTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"keyword": {
+				"type": "string",
+				"description": "要删除的歌曲关键词（歌名或歌手名）"
+			},
+			"exclude_artists": {
+				"type": "array",
+				"items": {"type": "string"},
+				"description": "要保留（不删除）的歌手列表"
+			}
+		},
+		"required": ["keyword"]
+	}`)
+}
+
+func (t *DeleteMusicCacheTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	if t.cache == nil || !t.cache.Enabled() {
+		return `{"success":false,"message":"音乐缓存未启用"}`, nil
+	}
+
+	var params struct {
+		Keyword        string   `json:"keyword"`
+		ExcludeArtists []string `json:"exclude_artists"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("解析参数失败: %w", err)
+	}
+
+	if params.Keyword == "" {
+		return "", fmt.Errorf("缺少 keyword 参数")
+	}
+
+	deleted := t.cache.Delete(params.Keyword, params.ExcludeArtists)
+	if deleted == 0 {
+		return fmt.Sprintf(`{"success":true,"message":"没有找到匹配'%s'的缓存歌曲"}`, params.Keyword), nil
+	}
+
+	return fmt.Sprintf(`{"success":true,"message":"已删除 %d 首匹配'%s'的缓存歌曲"}`, deleted, params.Keyword), nil
 }

@@ -32,8 +32,9 @@ func (m PlayMode) String() string {
 
 // PlaylistItem 播放列表中的一项，包含歌曲信息和播放 URL。
 type PlaylistItem struct {
-	Song Song
-	URL  string // 播放地址（可能为空，需要时再获取）
+	Song     Song
+	URL      string // 播放地址（可能为空，需要时再获取）
+	CacheKey string // 缓存标识，如 "qq_12345678"
 }
 
 // Playlist 播放列表管理器，支持队列管理、播放模式切换和自动下一首。
@@ -123,45 +124,77 @@ func (pl *Playlist) CurrentIndex() int {
 }
 
 // Next 获取下一首歌曲的 URL，根据播放模式决定行为。
-// 返回 URL、歌曲名、歌手名和是否有下一首。
-// 如果到达列表末尾且非循环模式，返回 ("", "", "", false)。
-func (pl *Playlist) Next(ctx context.Context) (url, songName, artist string, ok bool) {
+// 返回 URL、歌曲名、歌手名、缓存标识和是否有下一首。
+// 如果到达列表末尾且非循环模式，返回 ("", "", "", "", false)。
+// 对于有 CacheKey 的歌曲（缓存命中），不需要 URL，直接返回。
+func (pl *Playlist) Next(ctx context.Context) (url, songName, artist, cacheKey string, ok bool) {
 	pl.mu.Lock()
-	defer pl.mu.Unlock()
 
-	if len(pl.items) == 0 {
-		return "", "", "", false
-	}
+	skipped := 0
+	maxSkips := len(pl.items) // 最多跳过整个列表，防止死循环
 
-	nextIdx := pl.nextIndex()
-	if nextIdx < 0 {
-		return "", "", "", false
-	}
-
-	pl.current = nextIdx
-	item := &pl.items[pl.current]
-
-	// 如果 URL 为空，尝试获取
-	if item.URL == "" {
-		var err error
-		item.URL, err = pl.resolveURL(ctx, item.Song)
-		if err != nil || item.URL == "" {
-			logger.Warnf("[playlist] 获取歌曲 URL 失败: %s - %s: %v", item.Song.Name, item.Song.Artist, err)
-			// 跳过此曲，尝试下一首（递归但释放锁）
+	for {
+		if len(pl.items) == 0 {
 			pl.mu.Unlock()
-			return pl.Next(ctx)
+			return "", "", "", "", false
 		}
-	}
 
-	// 记录播放历史
-	if pl.history != nil {
-		if addErr := pl.history.Add(item.Song); addErr != nil {
-			logger.Debugf("[playlist] 保存播放历史失败: %v", addErr)
+		nextIdx := pl.nextIndex()
+		if nextIdx < 0 {
+			pl.mu.Unlock()
+			return "", "", "", "", false
 		}
-	}
 
-	logger.Infof("[playlist] 播放第 %d/%d 首: %s - %s", pl.current+1, len(pl.items), item.Song.Name, item.Song.Artist)
-	return item.URL, item.Song.Name, item.Song.Artist, true
+		pl.current = nextIdx
+		item := &pl.items[pl.current]
+
+		// 有缓存标识的歌曲不需要 URL，可直接从本地播放
+		if item.CacheKey != "" {
+			// 记录播放历史
+			if pl.history != nil {
+				if addErr := pl.history.Add(item.Song); addErr != nil {
+					logger.Debugf("[playlist] 保存播放历史失败: %v", addErr)
+				}
+			}
+			logger.Infof("[playlist] 播放第 %d/%d 首: %s - %s (缓存)", pl.current+1, len(pl.items), item.Song.Name, item.Song.Artist)
+			pl.mu.Unlock()
+			return item.URL, item.Song.Name, item.Song.Artist, item.CacheKey, true
+		}
+
+		// 如果 URL 为空，尝试获取
+		if item.URL == "" {
+			// 释放锁再做网络请求，避免持锁阻塞
+			song := item.Song
+			pl.mu.Unlock()
+
+			resolvedURL, err := pl.resolveURL(ctx, song)
+
+			pl.mu.Lock()
+			if err != nil || resolvedURL == "" {
+				logger.Warnf("[playlist] 获取歌曲 URL 失败: %s - %s: %v", song.Name, song.Artist, err)
+				skipped++
+				if skipped >= maxSkips {
+					logger.Warnf("[playlist] 已跳过 %d 首歌曲，全部无法播放", skipped)
+					pl.mu.Unlock()
+					return "", "", "", "", false
+				}
+				// 跳过此曲，继续循环尝试下一首
+				continue
+			}
+			item.URL = resolvedURL
+		}
+
+		// 记录播放历史
+		if pl.history != nil {
+			if addErr := pl.history.Add(item.Song); addErr != nil {
+				logger.Debugf("[playlist] 保存播放历史失败: %v", addErr)
+			}
+		}
+
+		logger.Infof("[playlist] 播放第 %d/%d 首: %s - %s", pl.current+1, len(pl.items), item.Song.Name, item.Song.Artist)
+		pl.mu.Unlock()
+		return item.URL, item.Song.Name, item.Song.Artist, item.CacheKey, true
+	}
 }
 
 // Peek 预览下一首歌曲信息（不改变当前索引）。
@@ -221,7 +254,7 @@ func (pl *Playlist) nextIndex() int {
 	}
 }
 
-// resolveURL 为歌曲获取播放 URL（调用方需持有锁，此方法不加锁）。
+// resolveURL 为歌曲获取播放 URL（此方法不加锁，调用方应在无锁状态下调用）。
 func (pl *Playlist) resolveURL(ctx context.Context, song Song) (string, error) {
 	if pl.provider == nil {
 		return "", fmt.Errorf("provider not set")

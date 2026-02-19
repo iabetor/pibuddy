@@ -7,6 +7,7 @@ import (
 	"github.com/iabetor/pibuddy/internal/logger"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,12 @@ import (
 	"github.com/gen2brain/malgo"
 	"github.com/hajimehoshi/go-mp3"
 )
+
+// PlayOptions 播放选项，包含缓存相关信息。
+type PlayOptions struct {
+	CacheKey string      // 缓存标识，如 "qq_12345678"
+	Cache    *MusicCache // 缓存管理器（nil 则不缓存）
+}
 
 // StreamPlayer 支持从 HTTP URL 流式播放 MP3 音频。
 type StreamPlayer struct {
@@ -40,7 +47,20 @@ func NewStreamPlayer(channels int) (*StreamPlayer, error) {
 
 // Play 从 URL 流式下载并播放 MP3 音频。
 // 使用边下载边播放的流式架构，减少首次播放延迟。
-func (sp *StreamPlayer) Play(ctx context.Context, url string) error {
+// opts 为可选的缓存选项，nil 时行为与不缓存一致。
+func (sp *StreamPlayer) Play(ctx context.Context, url string, opts *PlayOptions) error {
+	// 如果有缓存选项且缓存命中，直接从本地文件播放
+	if opts != nil && opts.Cache != nil && opts.Cache.Enabled() && opts.CacheKey != "" {
+		if cachedPath, ok := opts.Cache.Lookup(opts.CacheKey); ok {
+			logger.Infof("[audio] 缓存命中: %s，从本地文件播放", opts.CacheKey)
+			err := sp.playFromFile(ctx, cachedPath)
+			if err == nil {
+				opts.Cache.TouchLastPlayed(opts.CacheKey)
+			}
+			return err
+		}
+	}
+
 	sp.mu.Lock()
 	if sp.closed {
 		sp.mu.Unlock()
@@ -60,7 +80,23 @@ func (sp *StreamPlayer) Play(ctx context.Context, url string) error {
 	sb := newStreamingBuffer()
 
 	// 后台下载 goroutine：将数据流式写入 streamingBuffer
-	go sp.streamDownload(streamCtx, url, sb)
+	// 同时 tee 写入本地缓存文件
+	var cacheWriter *cacheFileWriter
+	if opts != nil && opts.Cache != nil && opts.Cache.Enabled() && opts.CacheKey != "" {
+		cw, err := newCacheFileWriter(opts.Cache.TempFilePath(opts.CacheKey))
+		if err != nil {
+			logger.Warnf("[audio] 创建缓存文件失败（将跳过缓存）: %v", err)
+		} else {
+			cacheWriter = cw
+		}
+	}
+
+	// 下载完成后立即 commit 缓存文件（不必等播放结束），这样即使播放被打断也能保留缓存
+	var cacheCommitPath string
+	if cacheWriter != nil && opts != nil && opts.Cache != nil && opts.CacheKey != "" {
+		cacheCommitPath = opts.Cache.FilePath(opts.CacheKey)
+	}
+	go sp.streamDownload(streamCtx, url, sb, cacheWriter, cacheCommitPath)
 
 	// 等待至少 32KB 数据到达再初始化解码器（MP3 帧头 + 几帧数据）
 	waitStart := time.Now()
@@ -246,6 +282,7 @@ preBufferLoop:
 	select {
 	case <-streamCtx.Done():
 		logger.Debug("[audio] 流式播放被取消")
+		// 缓存文件的 commit/abort 由 streamDownload 自行处理
 		return streamCtx.Err()
 	case err := <-errCh:
 		return err
@@ -314,8 +351,27 @@ func isNetworkError(err error) bool {
 }
 
 // streamDownload 流式下载音频数据到 streamingBuffer，支持网络中断后断点续传。
-func (sp *StreamPlayer) streamDownload(ctx context.Context, url string, sb *streamingBuffer) {
+// 如果 cw 不为 nil，同时将数据写入缓存文件。
+// 下载成功完成后，如果 commitPath 非空则自动 commit 缓存文件。
+func (sp *StreamPlayer) streamDownload(ctx context.Context, url string, sb *streamingBuffer, cw *cacheFileWriter, commitPath string) {
 	const maxRetries = 3
+	downloadOK := false // 标记下载是否完整完成
+
+	// 下载结束后自动处理缓存文件
+	defer func() {
+		if cw == nil {
+			return
+		}
+		if downloadOK && commitPath != "" {
+			if err := cw.Commit(commitPath); err != nil {
+				logger.Warnf("[audio] 提交缓存文件失败: %v", err)
+			} else {
+				logger.Debugf("[audio] 缓存文件已保存: %s", commitPath)
+			}
+		} else {
+			cw.Abort()
+		}
+	}()
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -383,6 +439,10 @@ func (sp *StreamPlayer) streamDownload(ctx context.Context, url string, sb *stre
 					chunk := make([]byte, n)
 					copy(chunk, buf[:n])
 					sb.Append(chunk)
+					// 同时写入缓存文件
+					if cw != nil {
+						cw.Write(chunk)
+					}
 				}
 				if err != nil {
 					if err == io.EOF {
@@ -396,6 +456,7 @@ func (sp *StreamPlayer) streamDownload(ctx context.Context, url string, sb *stre
 		if readErr == nil {
 			// 下载成功完成
 			logger.Debugf("[audio] 下载完成: %d 字节", sb.Len())
+			downloadOK = true
 			sb.Finish(nil)
 			return
 		}
@@ -535,4 +596,229 @@ func (sb *streamingBuffer) Seek(offset int64, whence int) (int64, error) {
 	}
 	sb.pos = int(newPos)
 	return newPos, nil
+}
+
+// playFromFile 从本地文件播放 MP3 音频。
+func (sp *StreamPlayer) playFromFile(ctx context.Context, filePath string) error {
+	sp.mu.Lock()
+	if sp.closed {
+		sp.mu.Unlock()
+		return fmt.Errorf("播放器已关闭")
+	}
+	fileCtx, cancel := context.WithCancel(ctx)
+	sp.cancel = cancel
+	sp.mu.Unlock()
+
+	defer func() {
+		sp.mu.Lock()
+		sp.cancel = nil
+		sp.mu.Unlock()
+	}()
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("打开缓存文件失败: %w", err)
+	}
+	defer f.Close()
+
+	decoder, err := mp3.NewDecoder(f)
+	if err != nil {
+		return fmt.Errorf("创建 MP3 解码器失败: %w", err)
+	}
+
+	sampleRate := decoder.SampleRate()
+	logger.Debugf("[audio] 从缓存播放: 采样率 %d Hz, 文件 %s", sampleRate, filePath)
+
+	chunkSize := sampleRate * 2
+	const bufferChunks = 5
+	sampleCh := make(chan []float32, bufferChunks)
+	errCh := make(chan error, 1)
+
+	// 解码
+	go func() {
+		defer close(sampleCh)
+		buf := make([]byte, 16384)
+		var samples []float32
+
+		for {
+			select {
+			case <-fileCtx.Done():
+				return
+			default:
+			}
+
+			n, err := decoder.Read(buf)
+			if err != nil {
+				if err == io.EOF {
+					if len(samples) > 0 {
+						select {
+						case sampleCh <- samples:
+						case <-fileCtx.Done():
+						}
+					}
+					return
+				}
+				select {
+				case errCh <- fmt.Errorf("读取音频数据失败: %w", err):
+				default:
+				}
+				return
+			}
+			if n == 0 {
+				continue
+			}
+
+			chunkSamples := int16StereoToMonoFloat32(buf[:n])
+			samples = append(samples, chunkSamples...)
+
+			for len(samples) >= chunkSize {
+				chunk := make([]float32, chunkSize)
+				copy(chunk, samples[:chunkSize])
+				samples = samples[chunkSize:]
+				select {
+				case sampleCh <- chunk:
+				case <-fileCtx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	// 预缓冲
+	preBuffer := make([][]float32, 0, 1)
+preBufferFileLoop:
+	for len(preBuffer) < 1 {
+		select {
+		case <-fileCtx.Done():
+			return fileCtx.Err()
+		case err := <-errCh:
+			return err
+		case chunk, ok := <-sampleCh:
+			if !ok {
+				break preBufferFileLoop
+			}
+			preBuffer = append(preBuffer, chunk)
+		}
+	}
+	if len(preBuffer) == 0 {
+		return nil
+	}
+
+	var totalLen int
+	for _, c := range preBuffer {
+		totalLen += len(c)
+	}
+	pcmData := make([]byte, 0, totalLen*2)
+	for _, c := range preBuffer {
+		pcmData = append(pcmData, Float32ToBytes(c)...)
+	}
+	pos := 0
+	done := make(chan struct{})
+
+	deviceConfig := malgo.DefaultDeviceConfig(malgo.Playback)
+	deviceConfig.Playback.Format = malgo.FormatS16
+	deviceConfig.Playback.Channels = sp.channels
+	deviceConfig.SampleRate = uint32(sampleRate)
+	deviceConfig.PeriodSizeInFrames = 4096
+	deviceConfig.Periods = 4
+
+	callbacks := malgo.DeviceCallbacks{
+		Data: func(outputSamples, inputSamples []byte, frameCount uint32) {
+			totalBytes := int(frameCount) * int(sp.channels) * 2
+			writePos := 0
+
+			for writePos < totalBytes {
+				if pos >= len(pcmData) {
+					select {
+					case chunk, ok := <-sampleCh:
+						if !ok {
+							for i := writePos; i < totalBytes; i++ {
+								outputSamples[i] = 0
+							}
+							select {
+							case done <- struct{}{}:
+							default:
+							}
+							return
+						}
+						pcmData = Float32ToBytes(chunk)
+						pos = 0
+					}
+				}
+
+				end := pos + (totalBytes - writePos)
+				if end > len(pcmData) {
+					end = len(pcmData)
+				}
+				copied := copy(outputSamples[writePos:], pcmData[pos:end])
+				pos = end
+				writePos += copied
+			}
+		},
+	}
+
+	device, err := malgo.InitDevice(sp.ctx.Context, deviceConfig, callbacks)
+	if err != nil {
+		return fmt.Errorf("初始化播放设备失败: %w", err)
+	}
+	defer device.Uninit()
+
+	if err := device.Start(); err != nil {
+		return fmt.Errorf("启动播放设备失败: %w", err)
+	}
+	defer device.Stop()
+
+	select {
+	case <-fileCtx.Done():
+		logger.Debug("[audio] 缓存播放被取消")
+		return fileCtx.Err()
+	case err := <-errCh:
+		return err
+	case <-done:
+		logger.Debug("[audio] 缓存播放完成")
+		return nil
+	}
+}
+
+// cacheFileWriter 用于将下载的音频数据异步写入缓存文件。
+type cacheFileWriter struct {
+	file *os.File
+	path string
+}
+
+func newCacheFileWriter(tmpPath string) (*cacheFileWriter, error) {
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return nil, err
+	}
+	return &cacheFileWriter{file: f, path: tmpPath}, nil
+}
+
+// Write 写入数据到临时文件。
+func (cw *cacheFileWriter) Write(data []byte) {
+	if cw.file != nil {
+		cw.file.Write(data)
+	}
+}
+
+// Commit 关闭临时文件并原子 rename 到最终路径。
+func (cw *cacheFileWriter) Commit(finalPath string) error {
+	if cw.file == nil {
+		return nil
+	}
+	if err := cw.file.Close(); err != nil {
+		os.Remove(cw.path)
+		return err
+	}
+	cw.file = nil
+	return os.Rename(cw.path, finalPath)
+}
+
+// Abort 放弃缓存，关闭并删除临时文件。
+func (cw *cacheFileWriter) Abort() {
+	if cw.file != nil {
+		cw.file.Close()
+		os.Remove(cw.path)
+		cw.file = nil
+	}
 }
