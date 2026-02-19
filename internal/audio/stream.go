@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gen2brain/malgo"
 	"github.com/hajimehoshi/go-mp3"
@@ -54,42 +55,36 @@ func (sp *StreamPlayer) Play(ctx context.Context, url string) error {
 		sp.mu.Unlock()
 	}()
 
-	// 下载音频
-	req, err := http.NewRequestWithContext(streamCtx, "GET", url, nil)
-	if err != nil {
-		return fmt.Errorf("创建请求失败: %w", err)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
+	// 先完整下载音频到内存缓冲，支持网络中断重试
+	audioData, err := sp.downloadWithRetry(streamCtx, url)
 	if err != nil {
 		return fmt.Errorf("下载音频失败: %w", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载音频返回错误状态码: %d", resp.StatusCode)
+	if len(audioData) == 0 {
+		return nil
 	}
 
 	// 解码 MP3
-	decoder, err := mp3.NewDecoder(resp.Body)
+	reader := newBytesReadSeeker(audioData)
+	decoder, err := mp3.NewDecoder(reader)
 	if err != nil {
 		return fmt.Errorf("创建 MP3 解码器失败: %w", err)
 	}
 
 	sampleRate := decoder.SampleRate()
-	logger.Debugf("[audio] 流式播放: 采样率 %d Hz", sampleRate)
+	logger.Debugf("[audio] 流式播放: 采样率 %d Hz, 数据 %d 字节", sampleRate, len(audioData))
 
-	// 创建音频数据通道，根据采样率动态计算块大小
+	// 创建音频数据通道
 	chunkSize := sampleRate * 2 // 约 2 秒的样本数
 	const bufferChunks = 5
 	sampleCh := make(chan []float32, bufferChunks)
 	errCh := make(chan error, 1)
 
-	// 生产者：后台解码
+	// 生产者：后台解码（数据已在内存中，不会有网络错误）
 	go func() {
 		defer close(sampleCh)
 
-		buf := make([]byte, 16384) // 更大的读取缓冲区
+		buf := make([]byte, 16384)
 		var samples []float32
 
 		for {
@@ -101,15 +96,14 @@ func (sp *StreamPlayer) Play(ctx context.Context, url string) error {
 
 			n, err := decoder.Read(buf)
 			if err != nil {
-				// EOF 或网络错误都视为播放结束
-				if err == io.EOF || isNetworkError(err) {
+				if err == io.EOF {
 					if len(samples) > 0 {
 						select {
 						case sampleCh <- samples:
 						case <-streamCtx.Done():
 						}
 					}
-					logger.Debugf("[audio] 解码结束: %v", err)
+					logger.Debugf("[audio] 解码结束")
 					return
 				}
 				select {
@@ -184,16 +178,18 @@ preBufferLoop:
 
 	callbacks := malgo.DeviceCallbacks{
 		Data: func(outputSamples, inputSamples []byte, frameCount uint32) {
-			bytesNeeded := int(frameCount) * int(sp.channels) * 2
+			totalBytes := int(frameCount) * int(sp.channels) * 2
+			writePos := 0
 
-			for bytesNeeded > 0 {
+			for writePos < totalBytes {
 				if pos >= len(pcmData) {
 					// 当前块播完，尝试获取下一块
+					// 先用阻塞方式等待，避免不必要的静音间隙
 					select {
 					case chunk, ok := <-sampleCh:
 						if !ok {
-							// 所有数据播完
-							for i := range outputSamples[:bytesNeeded] {
+							// 所有数据播完，填充剩余部分为静音
+							for i := writePos; i < totalBytes; i++ {
 								outputSamples[i] = 0
 							}
 							select {
@@ -204,22 +200,16 @@ preBufferLoop:
 						}
 						pcmData = Float32ToBytes(chunk)
 						pos = 0
-					default:
-						// 通道为空，填充静音等待
-						for i := range outputSamples[:bytesNeeded] {
-							outputSamples[i] = 0
-						}
-						return
 					}
 				}
 
-				end := pos + bytesNeeded
+				end := pos + (totalBytes - writePos)
 				if end > len(pcmData) {
 					end = len(pcmData)
 				}
-				copied := copy(outputSamples[len(outputSamples)-bytesNeeded:], pcmData[pos:end])
+				copied := copy(outputSamples[writePos:], pcmData[pos:end])
 				pos = end
-				bytesNeeded -= copied
+				writePos += copied
 			}
 		},
 	}
@@ -303,4 +293,129 @@ func isNetworkError(err error) bool {
 	}
 	return strings.Contains(err.Error(), "connection reset by peer") ||
 		strings.Contains(err.Error(), "broken pipe")
+}
+
+// downloadWithRetry 下载音频数据，支持网络中断后使用 Range 请求断点续传。
+func (sp *StreamPlayer) downloadWithRetry(ctx context.Context, url string) ([]byte, error) {
+	const maxRetries = 3
+	var data []byte
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("创建请求失败: %w", err)
+		}
+
+		// 断点续传：从已下载的偏移量开始
+		if len(data) > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", len(data)))
+			logger.Debugf("[audio] 断点续传: 从 %d 字节处继续下载 (第 %d 次重试)", len(data), attempt)
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if attempt < maxRetries {
+				logger.Debugf("[audio] 下载失败，%d 秒后重试: %v", attempt+1, err)
+				select {
+				case <-time.After(time.Duration(attempt+1) * time.Second):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				continue
+			}
+			return nil, fmt.Errorf("下载音频失败: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			resp.Body.Close()
+			if attempt < maxRetries {
+				logger.Debugf("[audio] 下载返回状态码 %d，重试中", resp.StatusCode)
+				select {
+				case <-time.After(time.Duration(attempt+1) * time.Second):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				continue
+			}
+			return nil, fmt.Errorf("下载音频返回错误状态码: %d", resp.StatusCode)
+		}
+
+		// 读取所有数据
+		chunk, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		data = append(data, chunk...)
+
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if isNetworkError(err) && attempt < maxRetries {
+				logger.Debugf("[audio] 读取中断(%d 字节已下载)，%d 秒后重试: %v", len(data), attempt+1, err)
+				select {
+				case <-time.After(time.Duration(attempt+1) * time.Second):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				continue
+			}
+			// 非网络错误或已耗尽重试次数，用已有数据继续
+			if len(data) > 0 {
+				logger.Debugf("[audio] 下载不完整(%d 字节)，使用已有数据: %v", len(data), err)
+				return data, nil
+			}
+			return nil, fmt.Errorf("下载音频失败: %w", err)
+		}
+
+		// 下载成功
+		logger.Debugf("[audio] 下载完成: %d 字节", len(data))
+		return data, nil
+	}
+
+	// 重试耗尽，用已有数据
+	if len(data) > 0 {
+		logger.Debugf("[audio] 重试耗尽，使用已有数据: %d 字节", len(data))
+		return data, nil
+	}
+	return nil, fmt.Errorf("下载音频失败: 重试耗尽")
+}
+
+// bytesReadSeeker 将 []byte 包装成 io.ReadSeeker（mp3.NewDecoder 需要）。
+type bytesReadSeeker struct {
+	data []byte
+	pos  int
+}
+
+func newBytesReadSeeker(data []byte) *bytesReadSeeker {
+	return &bytesReadSeeker{data: data}
+}
+
+func (b *bytesReadSeeker) Read(p []byte) (int, error) {
+	if b.pos >= len(b.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, b.data[b.pos:])
+	b.pos += n
+	return n, nil
+}
+
+func (b *bytesReadSeeker) Seek(offset int64, whence int) (int64, error) {
+	var newPos int64
+	switch whence {
+	case io.SeekStart:
+		newPos = offset
+	case io.SeekCurrent:
+		newPos = int64(b.pos) + offset
+	case io.SeekEnd:
+		newPos = int64(len(b.data)) + offset
+	default:
+		return 0, fmt.Errorf("invalid whence: %d", whence)
+	}
+	if newPos < 0 {
+		return 0, fmt.Errorf("negative position")
+	}
+	b.pos = int(newPos)
+	return newPos, nil
 }

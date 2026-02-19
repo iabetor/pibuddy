@@ -49,6 +49,7 @@ type VoiceprintConfig struct {
 	Threshold  float32 `yaml:"threshold"`
 	NumThreads int     `yaml:"num_threads"`
 	BufferSecs float32 `yaml:"buffer_secs"`
+	OwnerName  string  `yaml:"owner_name"` // 主人姓名
 }
 
 // AudioConfig 音频采集/播放配置。
@@ -118,15 +119,29 @@ type PiperConfig struct {
 
 // ToolsConfig 工具配置。
 type ToolsConfig struct {
-	DataDir string      `yaml:"data_dir"`
+	DataDir string        `yaml:"data_dir"`
 	Weather WeatherConfig `yaml:"weather"`
-	Music   MusicConfig  `yaml:"music"`
+	Music   MusicConfig   `yaml:"music"`
+	RSS     RSSConfig     `yaml:"rss"`
+}
+
+// RSSConfig RSS 订阅功能配置。
+type RSSConfig struct {
+	Enabled  bool `yaml:"enabled"`
+	CacheTTL int  `yaml:"cache_ttl"` // 缓存有效期（分钟），默认 30
 }
 
 // MusicConfig 音乐服务配置。
 type MusicConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	APIURL  string `yaml:"api_url"`
+	Enabled  bool   `yaml:"enabled"`
+	Provider string `yaml:"provider"` // netease 或 qq
+	APIURL   string `yaml:"api_url"`  // 兼容旧配置
+	Netease  struct {
+		APIURL string `yaml:"api_url"` // 网易云 API 地址
+	} `yaml:"netease"`
+	QQ struct {
+		APIURL string `yaml:"api_url"` // QQ 音乐 API 地址
+	} `yaml:"qq"`
 }
 
 // WeatherConfig 和风天气配置。

@@ -14,8 +14,28 @@ import (
 
 // User 表示一个已注册的声纹用户。
 type User struct {
-	ID   int64
-	Name string
+	ID          int64
+	Name        string
+	isOwner     bool    // 私有字段，避免与方法冲突
+	Preferences string // JSON 格式的用户偏好
+}
+
+// GetPreferences 实现 UserPreferences 接口。
+func (u *User) GetPreferences() string {
+	return u.Preferences
+}
+
+// IsOwner 实现 UserPreferences 接口。
+func (u *User) IsOwner() bool {
+	return u.isOwner
+}
+
+// UserPreferences 用户偏好结构。
+type UserPreferences struct {
+	Style      string   `json:"style,omitempty"`      // 回复风格，如"简洁直接"
+	Interests  []string `json:"interests,omitempty"`  // 兴趣爱好
+	Nickname   string   `json:"nickname,omitempty"`   // 昵称
+	Extra      string   `json:"extra,omitempty"`      // 额外描述
 }
 
 // UserEmbedding 表示用户的一条 embedding 记录。
@@ -64,6 +84,7 @@ func NewStore(dataDir string) (*Store, error) {
 }
 
 func createTables(db *sql.DB) error {
+	// 先创建基础表（如果不存在）
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS users (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,6 +101,17 @@ func createTables(db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("创建数据表失败: %w", err)
 	}
+
+	// 添加新字段（如果不存在）
+	migrations := []string{
+		"ALTER TABLE users ADD COLUMN is_owner BOOLEAN DEFAULT 0",
+		"ALTER TABLE users ADD COLUMN preferences TEXT DEFAULT ''",
+	}
+	for _, m := range migrations {
+		// SQLite 不支持 IF NOT EXISTS for ALTER TABLE，忽略错误
+		db.Exec(m)
+	}
+
 	return nil
 }
 
@@ -121,7 +153,7 @@ func (s *Store) AddEmbedding(userID int64, embedding []float32) error {
 // GetUser 根据名称获取用户。
 func (s *Store) GetUser(name string) (*User, error) {
 	var u User
-	err := s.db.QueryRow("SELECT id, name FROM users WHERE name = ?", name).Scan(&u.ID, &u.Name)
+	err := s.db.QueryRow("SELECT id, name, is_owner, preferences FROM users WHERE name = ?", name).Scan(&u.ID, &u.Name, &u.isOwner, &u.Preferences)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -133,7 +165,7 @@ func (s *Store) GetUser(name string) (*User, error) {
 
 // ListUsers 列出所有用户。
 func (s *Store) ListUsers() ([]User, error) {
-	rows, err := s.db.Query("SELECT id, name FROM users ORDER BY id")
+	rows, err := s.db.Query("SELECT id, name, is_owner, preferences FROM users ORDER BY is_owner DESC, id")
 	if err != nil {
 		return nil, fmt.Errorf("列出用户失败: %w", err)
 	}
@@ -142,7 +174,7 @@ func (s *Store) ListUsers() ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Name); err != nil {
+		if err := rows.Scan(&u.ID, &u.Name, &u.isOwner, &u.Preferences); err != nil {
 			return nil, fmt.Errorf("读取用户数据失败: %w", err)
 		}
 		users = append(users, u)
@@ -155,6 +187,50 @@ func (s *Store) DeleteUser(name string) error {
 	result, err := s.db.Exec("DELETE FROM users WHERE name = ?", name)
 	if err != nil {
 		return fmt.Errorf("删除用户失败: %w", err)
+	}
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("用户 %s 不存在", name)
+	}
+	return nil
+}
+
+// SetOwner 设置用户为主人。ownerName 只能有一个主人，设置新主人会取消旧主人。
+func (s *Store) SetOwner(name string) error {
+	// 先取消所有主人
+	if _, err := s.db.Exec("UPDATE users SET is_owner = 0"); err != nil {
+		return fmt.Errorf("取消旧主人失败: %w", err)
+	}
+	// 设置新主人
+	result, err := s.db.Exec("UPDATE users SET is_owner = 1 WHERE name = ?", name)
+	if err != nil {
+		return fmt.Errorf("设置主人失败: %w", err)
+	}
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("用户 %s 不存在", name)
+	}
+	return nil
+}
+
+// GetOwner 获取主人信息。如果没有主人返回 nil。
+func (s *Store) GetOwner() (*User, error) {
+	var u User
+	err := s.db.QueryRow("SELECT id, name, is_owner, preferences FROM users WHERE is_owner = 1").Scan(&u.ID, &u.Name, &u.isOwner, &u.Preferences)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("查询主人失败: %w", err)
+	}
+	return &u, nil
+}
+
+// SetPreferences 设置用户偏好。
+func (s *Store) SetPreferences(name string, preferences string) error {
+	result, err := s.db.Exec("UPDATE users SET preferences = ? WHERE name = ?", preferences, name)
+	if err != nil {
+		return fmt.Errorf("设置偏好失败: %w", err)
 	}
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {

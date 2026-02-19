@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/iabetor/pibuddy/internal/logger"
 	"github.com/iabetor/pibuddy/internal/music"
 )
 
@@ -32,7 +33,7 @@ func NewSearchMusicTool(cfg MusicConfig) *SearchMusicTool {
 func (t *SearchMusicTool) Name() string { return "search_music" }
 
 func (t *SearchMusicTool) Description() string {
-	return "搜索音乐。当用户想听歌时先调用此工具搜索，返回搜索结果列表，等待用户确认后再播放。"
+	return "搜索音乐。仅在用户明确要求'搜索'、'查找'歌曲而非播放时使用。如果用户想听歌，请直接使用 play_music 工具。"
 }
 
 func (t *SearchMusicTool) Parameters() json.RawMessage {
@@ -56,17 +57,19 @@ type SearchResult struct {
 }
 
 type SongInfo struct {
-	ID     int64  `json:"id"`
-	Name   string `json:"name"`
-	Artist string `json:"artist"`
-	Album  string `json:"album"`
+	ID       int64  `json:"id"`
+	MID      string `json:"mid,omitempty"`       // QQ 音乐 songmid
+	MediaMID string `json:"media_mid,omitempty"` // QQ 音乐 strMediaMid
+	Name     string `json:"name"`
+	Artist   string `json:"artist"`
+	Album    string `json:"album"`
 }
 
 func (t *SearchMusicTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	if !t.enabled || t.provider == nil {
 		result := SearchResult{
 			Success: false,
-			Error:   "音乐服务未启用，请先部署 NeteaseCloudMusicApi",
+			Error:   "音乐服务未启用，请先部署音乐 API 服务",
 		}
 		return marshalMusicResult(result)
 	}
@@ -104,10 +107,12 @@ func (t *SearchMusicTool) Execute(ctx context.Context, args json.RawMessage) (st
 	songInfos := make([]SongInfo, len(songs))
 	for i, s := range songs {
 		songInfos[i] = SongInfo{
-			ID:     s.ID,
-			Name:   s.Name,
-			Artist: s.Artist,
-			Album:  s.Album,
+			ID:       s.ID,
+			MID:      s.GetMID(),
+			MediaMID: s.GetMediaMID(),
+			Name:     s.Name,
+			Artist:   s.Artist,
+			Album:    s.Album,
 		}
 	}
 
@@ -137,27 +142,19 @@ func NewPlayMusicTool(cfg MusicConfig) *PlayMusicTool {
 func (t *PlayMusicTool) Name() string { return "play_music" }
 
 func (t *PlayMusicTool) Description() string {
-	return "播放指定歌曲。用户确认后调用此工具播放。需要提供歌曲ID（从search_music结果中获取）。"
+	return "播放音乐。当用户想听歌时直接调用此工具，只需提供关键词（歌名、歌手名等），会自动搜索并播放最匹配的歌曲。如果第一首因版权限制无法播放，会自动尝试下一首。"
 }
 
 func (t *PlayMusicTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
 		"properties": {
-			"song_id": {
-				"type": "integer",
-				"description": "歌曲ID，从search_music结果中获取"
-			},
-			"song_name": {
+			"keyword": {
 				"type": "string",
-				"description": "歌曲名称（用于历史记录）"
-			},
-			"artist": {
-				"type": "string",
-				"description": "歌手名（用于历史记录）"
+				"description": "歌曲名、歌手名或其组合，例如'周杰伦晴天'"
 			}
 		},
-		"required": ["song_id", "song_name", "artist"]
+		"required": ["keyword"]
 	}`)
 }
 
@@ -175,51 +172,91 @@ func (t *PlayMusicTool) Execute(ctx context.Context, args json.RawMessage) (stri
 	if !t.enabled || t.provider == nil {
 		result := MusicResult{
 			Success: false,
-			Error:   "音乐服务未启用，请先部署 NeteaseCloudMusicApi",
+			Error:   "音乐服务未启用，请先部署音乐 API 服务",
 		}
 		return marshalResult(result)
 	}
 
 	var params struct {
-		SongID   int64  `json:"song_id"`
-		SongName string `json:"song_name"`
-		Artist   string `json:"artist"`
+		Keyword string `json:"keyword"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", fmt.Errorf("解析参数失败: %w", err)
 	}
 
-	if params.SongID == 0 {
-		return "", fmt.Errorf("缺少 song_id 参数")
+	if params.Keyword == "" {
+		return "", fmt.Errorf("缺少 keyword 参数")
 	}
 
-	// 获取播放 URL
-	url, err := t.provider.GetSongURL(ctx, params.SongID)
+	// 搜索歌曲（多取几首用于 fallback）
+	songs, err := t.provider.Search(ctx, params.Keyword, 5)
 	if err != nil {
 		result := MusicResult{
 			Success: false,
-			Error:   fmt.Sprintf("获取播放地址失败: %v", err),
+			Error:   fmt.Sprintf("搜索失败: %v", err),
 		}
 		return marshalResult(result)
 	}
 
-	// 保存播放历史
-	if t.history != nil {
-		song := music.Song{
-			ID:     params.SongID,
-			Name:   params.SongName,
-			Artist: params.Artist,
+	if len(songs) == 0 {
+		result := MusicResult{
+			Success: false,
+			Error:   "没有找到相关歌曲",
 		}
-		if err := t.history.Add(song); err != nil {
-			fmt.Printf("[music] 保存播放历史失败: %v\n", err)
-		}
+		return marshalResult(result)
 	}
 
+	// 依次尝试获取播放 URL，跳过无版权 / VIP 歌曲
+	qqProvider, isQQ := t.provider.(music.QQProvider)
+
+	for i, song := range songs {
+		var songURL string
+		var urlErr error
+
+		if isQQ {
+			mid := song.GetMID()
+			if mid != "" {
+				songURL, urlErr = qqProvider.GetSongURLWithMID(ctx, song.ID, mid)
+			} else {
+				songURL, urlErr = t.provider.GetSongURL(ctx, song.ID)
+			}
+		} else {
+			songURL, urlErr = t.provider.GetSongURL(ctx, song.ID)
+		}
+
+		if urlErr != nil {
+			logger.Debugf("[music] 第 %d 首 %s - %s 无法播放: %v，尝试下一首", i+1, song.Name, song.Artist, urlErr)
+			continue
+		}
+
+		if songURL == "" {
+			logger.Debugf("[music] 第 %d 首 %s - %s URL 为空，尝试下一首", i+1, song.Name, song.Artist)
+			continue
+		}
+
+		// 找到可播放的歌曲
+		if t.history != nil {
+			if addErr := t.history.Add(song); addErr != nil {
+				logger.Debugf("[music] 保存播放历史失败: %v", addErr)
+			}
+		}
+
+		result := MusicResult{
+			Success:  true,
+			SongName: song.Name,
+			Artist:   song.Artist,
+			URL:      songURL,
+		}
+		if i > 0 {
+			logger.Infof("[music] 前 %d 首无法播放，已自动切换到: %s - %s", i, song.Name, song.Artist)
+		}
+		return marshalResult(result)
+	}
+
+	// 所有候选歌曲都无法播放
 	result := MusicResult{
-		Success:  true,
-		SongName: params.SongName,
-		Artist:   params.Artist,
-		URL:      url,
+		Success: false,
+		Error:   fmt.Sprintf("搜索到 %d 首歌曲，但均因版权限制无法播放", len(songs)),
 	}
 	return marshalResult(result)
 }

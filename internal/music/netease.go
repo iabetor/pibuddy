@@ -7,6 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -14,19 +18,108 @@ import (
 type NeteaseClient struct {
 	baseURL    string
 	httpClient *http.Client
+	dataDir    string
+
+	cookieMu   sync.RWMutex
+	cookies    []http.Cookie
+	cookieTime time.Time
 }
 
 // NewNeteaseClient 创建网易云音乐客户端。
 func NewNeteaseClient(baseURL string) *NeteaseClient {
+	return NewNeteaseClientWithDataDir(baseURL, "")
+}
+
+// NewNeteaseClientWithDataDir 创建网易云音乐客户端（指定数据目录）。
+func NewNeteaseClientWithDataDir(baseURL, dataDir string) *NeteaseClient {
 	if baseURL == "" {
 		baseURL = "http://localhost:3000"
 	}
+	if dataDir == "" {
+		dataDir = getDefaultDataDir()
+	}
 	return &NeteaseClient{
 		baseURL: baseURL,
+		dataDir: dataDir,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
 	}
+}
+
+func getDefaultDataDir() string {
+	dataDir := os.Getenv("PIBUDDY_DATA_DIR")
+	if dataDir == "" {
+		home, _ := os.UserHomeDir()
+		if home != "" {
+			dataDir = home + "/.pibuddy"
+		} else {
+			dataDir = "./.pibuddy-data"
+		}
+	}
+	return dataDir
+}
+
+// cookieFile 保存的 cookie 数据
+type cookieFile struct {
+	Cookies []http.Cookie `json:"cookies"`
+}
+
+// loadCookies 加载 cookie（带缓存，每分钟最多读取一次文件）
+func (c *NeteaseClient) loadCookies() []http.Cookie {
+	c.cookieMu.RLock()
+	// 缓存 1 分钟内有效
+	if len(c.cookies) > 0 && time.Since(c.cookieTime) < time.Minute {
+		cookies := c.cookies
+		c.cookieMu.RUnlock()
+		return cookies
+	}
+	c.cookieMu.RUnlock()
+
+	// 读取文件
+	c.cookieMu.Lock()
+	defer c.cookieMu.Unlock()
+
+	// 双重检查
+	if len(c.cookies) > 0 && time.Since(c.cookieTime) < time.Minute {
+		return c.cookies
+	}
+
+	path := filepath.Join(c.dataDir, "netease_cookie.json")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	var data cookieFile
+	if err := json.Unmarshal(content, &data); err != nil {
+		return nil
+	}
+
+	c.cookies = data.Cookies
+	c.cookieTime = time.Now()
+	return c.cookies
+}
+
+// cookieHeader 生成 Cookie 请求头
+func (c *NeteaseClient) cookieHeader() string {
+	cookies := c.loadCookies()
+	if len(cookies) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, cookie := range cookies {
+		parts = append(parts, url.QueryEscape(cookie.Name)+"="+url.QueryEscape(cookie.Value))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// doRequest 执行 HTTP 请求（自动附加 cookie）
+func (c *NeteaseClient) doRequest(req *http.Request) (*http.Response, error) {
+	if cookie := c.cookieHeader(); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	return c.httpClient.Do(req)
 }
 
 // searchResponse 搜索 API 响应结构。
@@ -72,7 +165,7 @@ func (c *NeteaseClient) Search(ctx context.Context, keyword string, limit int) (
 		return nil, fmt.Errorf("创建请求失败: %w", err)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("搜索请求失败: %w", err)
 	}
@@ -125,7 +218,7 @@ func (c *NeteaseClient) GetSongURL(ctx context.Context, songID int64) (string, e
 		return "", fmt.Errorf("创建请求失败: %w", err)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doRequest(req)
 	if err != nil {
 		return "", fmt.Errorf("获取播放地址请求失败: %w", err)
 	}

@@ -116,17 +116,41 @@ func TestContextManager_SetCurrentSpeaker(t *testing.T) {
 		t.Errorf("should not contain speaker info by default, got %q", msgs[0].Content)
 	}
 
-	// 设置说话人
-	cm.SetCurrentSpeaker("小明")
+	// 设置说话人（无偏好）
+	cm.SetCurrentSpeaker("小明", nil)
 	msgs = cm.Messages()
 	if !strings.Contains(msgs[0].Content, "当前对话用户: 小明") {
 		t.Errorf("system prompt should contain speaker name, got %q", msgs[0].Content)
 	}
 
+	// 设置说话人（有偏好）
+	cm.SetCurrentSpeaker("小明", &mockUserPreferences{prefs: `{"style":"简洁"}`, isOwner: false})
+	msgs = cm.Messages()
+	if !strings.Contains(msgs[0].Content, "当前对话用户: 小明") {
+		t.Errorf("system prompt should contain speaker name, got %q", msgs[0].Content)
+	}
+	if !strings.Contains(msgs[0].Content, "用户偏好:") {
+		t.Errorf("system prompt should contain user preferences, got %q", msgs[0].Content)
+	}
+
 	// 清空说话人
-	cm.SetCurrentSpeaker("")
+	cm.SetCurrentSpeaker("", nil)
 	msgs = cm.Messages()
 	if strings.Contains(msgs[0].Content, "当前对话用户") {
 		t.Errorf("should not contain speaker info after clearing, got %q", msgs[0].Content)
 	}
+}
+
+// mockUserPreferences 用于测试
+type mockUserPreferences struct {
+	prefs   string
+	isOwner bool
+}
+
+func (m *mockUserPreferences) GetPreferences() string {
+	return m.prefs
+}
+
+func (m *mockUserPreferences) IsOwner() bool {
+	return m.isOwner
 }

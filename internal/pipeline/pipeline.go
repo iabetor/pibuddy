@@ -16,6 +16,7 @@ import (
 	"github.com/iabetor/pibuddy/internal/llm"
 	"github.com/iabetor/pibuddy/internal/logger"
 	"github.com/iabetor/pibuddy/internal/music"
+	"github.com/iabetor/pibuddy/internal/rss"
 	"github.com/iabetor/pibuddy/internal/tools"
 	"github.com/iabetor/pibuddy/internal/tts"
 	"github.com/iabetor/pibuddy/internal/vad"
@@ -48,6 +49,10 @@ type Pipeline struct {
 	cancelSpeak context.CancelFunc
 	speakMu     sync.Mutex
 
+	// cancelQuery 在进入 Processing 状态时设置；打断时取消 LLM 调用。
+	cancelQuery context.CancelFunc
+	queryMu     sync.Mutex
+
 	// 流式播放器（音乐）
 	streamPlayer *audio.StreamPlayer
 
@@ -67,6 +72,7 @@ type Pipeline struct {
 	voiceprintBuf     []float32
 	voiceprintBufMu   sync.Mutex
 	voiceprintBufSize int // 目标缓冲大小 = BufferSecs * SampleRate
+	voiceprintWg      sync.WaitGroup // 等待声纹识别完成
 }
 
 // New 根据配置创建并初始化完整的 Pipeline。
@@ -161,6 +167,15 @@ func New(cfg *config.Config) (*Pipeline, error) {
 		} else {
 			p.voiceprintMgr = vpMgr
 			p.voiceprintBufSize = int(cfg.Voiceprint.BufferSecs * float32(cfg.Audio.SampleRate))
+
+			// 设置主人（如果配置了主人姓名）
+			if cfg.Voiceprint.OwnerName != "" {
+				if err := vpMgr.SetOwner(cfg.Voiceprint.OwnerName); err != nil {
+					logger.Warnf("[pipeline] 设置主人失败: %v", err)
+				} else {
+					logger.Infof("[pipeline] 已设置主人: %s", cfg.Voiceprint.OwnerName)
+				}
+			}
 		}
 	}
 
@@ -217,7 +232,28 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 	// 音乐工具
 	if cfg.Tools.Music.Enabled {
 		var musicProvider music.Provider
-		musicProvider = music.NewNeteaseClient(cfg.Tools.Music.APIURL)
+
+		// 根据 provider 配置选择音乐平台
+		switch cfg.Tools.Music.Provider {
+		case "qq":
+			apiURL := cfg.Tools.Music.QQ.APIURL
+			if apiURL == "" {
+				apiURL = "http://localhost:3300"
+			}
+			musicProvider = music.NewQQMusicClientWithDataDir(apiURL, cfg.Tools.DataDir)
+			logger.Infof("[pipeline] 使用 QQ 音乐 (API: %s)", apiURL)
+		default:
+			// 默认使用网易云音乐
+			apiURL := cfg.Tools.Music.Netease.APIURL
+			if apiURL == "" {
+				apiURL = cfg.Tools.Music.APIURL // 兼容旧配置
+			}
+			if apiURL == "" {
+				apiURL = "http://localhost:3000"
+			}
+			musicProvider = music.NewNeteaseClientWithDataDir(apiURL, cfg.Tools.DataDir)
+			logger.Infof("[pipeline] 使用网易云音乐 (API: %s)", apiURL)
+		}
 
 		// 创建播放历史存储
 		musicHistory, err := music.NewHistoryStore(cfg.Tools.DataDir)
@@ -233,6 +269,34 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 		p.toolRegistry.Register(tools.NewSearchMusicTool(musicCfg))
 		p.toolRegistry.Register(tools.NewPlayMusicTool(musicCfg))
 		p.toolRegistry.Register(tools.NewListMusicHistoryTool(musicHistory))
+	}
+
+	// RSS 订阅工具
+	if cfg.Tools.RSS.Enabled {
+		feedStore, err := rss.NewFeedStore(cfg.Tools.DataDir)
+		if err != nil {
+			logger.Warnf("[pipeline] 初始化 RSS 存储失败: %v", err)
+		} else {
+			fetcher := rss.NewFetcher(feedStore, cfg.Tools.DataDir, cfg.Tools.RSS.CacheTTL)
+			p.toolRegistry.Register(tools.NewAddRSSFeedTool(feedStore, fetcher))
+			p.toolRegistry.Register(tools.NewListRSSFeedsTool(feedStore))
+			p.toolRegistry.Register(tools.NewDeleteRSSFeedTool(feedStore))
+			p.toolRegistry.Register(tools.NewGetRSSNewsTool(feedStore, fetcher))
+			logger.Infof("[pipeline] RSS 订阅功能已启用")
+		}
+	}
+
+	// 声纹管理工具（仅主人可用）
+	if p.voiceprintMgr != nil {
+		vpCfg := tools.VoiceprintConfig{
+			Manager:    p.voiceprintMgr,
+			Capture:    p.capture,
+			SampleRate: cfg.Audio.SampleRate,
+			OwnerName:  cfg.Voiceprint.OwnerName,
+		}
+		p.toolRegistry.Register(tools.NewRegisterVoiceprintTool(vpCfg))
+		p.toolRegistry.Register(tools.NewDeleteVoiceprintTool(vpCfg))
+		p.toolRegistry.Register(tools.NewSetPreferencesTool(vpCfg))
 	}
 
 	logger.Infof("[pipeline] 已注册 %d 个工具", p.toolRegistry.Count())
@@ -375,7 +439,7 @@ func (p *Pipeline) detectWakeWord(frame []float32) bool {
 	return p.wakeDetector.Detect(frame)
 }
 
-// performInterrupt 执行打断逻辑：停止播放、设置打断标志、播放回复、延迟后进入监听。
+// performInterrupt 执行打断逻辑：停止播放、取消 LLM 调用、设置打断标志、播放回复、延迟后进入监听。
 func (p *Pipeline) performInterrupt(ctx context.Context) {
 	// 进入冷却期
 	p.wakeCooldownMu.Lock()
@@ -386,6 +450,13 @@ func (p *Pipeline) performInterrupt(ctx context.Context) {
 
 	// 设置打断标志，通知 processQuery goroutine 退出
 	p.interrupted.Store(true)
+
+	// 取消 LLM 调用（如果正在进行）
+	p.queryMu.Lock()
+	if p.cancelQuery != nil {
+		p.cancelQuery()
+	}
+	p.queryMu.Unlock()
 
 	// 停止所有播放
 	p.interruptSpeak()
@@ -445,7 +516,11 @@ func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
 			buf := p.voiceprintBuf
 			p.voiceprintBuf = nil
 			p.voiceprintBufMu.Unlock()
-			go p.identifySpeaker(buf)
+			p.voiceprintWg.Add(1)
+			go func() {
+				defer p.voiceprintWg.Done()
+				p.identifySpeaker(buf)
+			}()
 		} else {
 			p.voiceprintBufMu.Unlock()
 		}
@@ -477,7 +552,11 @@ func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
 			buf := p.voiceprintBuf
 			p.voiceprintBuf = nil
 			p.voiceprintBufMu.Unlock()
-			go p.identifySpeaker(buf)
+			p.voiceprintWg.Add(1)
+			go func() {
+				defer p.voiceprintWg.Done()
+				p.identifySpeaker(buf)
+			}()
 		} else {
 			p.voiceprintBufMu.Unlock()
 		}
@@ -501,8 +580,23 @@ func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
 //   - 有工具调用：丢弃前言文本，直接执行工具
 //   - 无工具调用：合并短句后批量 TTS，减少合成次数
 func (p *Pipeline) processQuery(ctx context.Context, query string) {
+	// 等待声纹识别完成（如果正在进行）
+	p.voiceprintWg.Wait()
+
 	// 重置打断标志
 	p.interrupted.Store(false)
+
+	// 创建可取消的 sub-context，打断时可立即停止 LLM 调用
+	queryCtx, cancelQuery := context.WithCancel(ctx)
+	p.queryMu.Lock()
+	p.cancelQuery = cancelQuery
+	p.queryMu.Unlock()
+	defer func() {
+		cancelQuery()
+		p.queryMu.Lock()
+		p.cancelQuery = nil
+		p.queryMu.Unlock()
+	}()
 
 	p.contextManager.Add("user", query)
 
@@ -517,7 +611,7 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 
 		messages := p.contextManager.Messages()
 
-		textCh, resultCh, err := p.llmProvider.ChatStreamWithTools(ctx, messages, toolDefs)
+		textCh, resultCh, err := p.llmProvider.ChatStreamWithTools(queryCtx, messages, toolDefs)
 		if err != nil {
 			logger.Errorf("[pipeline] LLM 调用失败: %v", err)
 			p.state.ForceIdle()
@@ -591,6 +685,21 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 				return
 			}
 
+			// 权限检查：声纹相关工具只有主人可用
+			if isVoiceprintTool(tc.Function.Name) {
+				speakerName := p.contextManager.GetCurrentSpeaker()
+				if !p.voiceprintMgr.IsOwner(speakerName) {
+					logger.Warnf("[pipeline] 非主人尝试调用 %s 工具: %s", tc.Function.Name, speakerName)
+					p.contextManager.AddMessage(llm.Message{
+						Role:       "tool",
+						Content:    `{"success":false,"message":"此功能仅主人可用"}`,
+						ToolCallID: tc.ID,
+						Name:       tc.Function.Name,
+					})
+					continue
+				}
+			}
+
 			logger.Infof("[pipeline] 调用工具: %s(%s)", tc.Function.Name, tc.Function.Arguments)
 
 			toolResult, err := p.toolRegistry.Execute(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
@@ -642,15 +751,24 @@ func (p *Pipeline) identifySpeaker(samples []float32) {
 	}
 	if name != "" {
 		logger.Debugf("[pipeline] 声纹识别结果: %s", name)
+		// 获取用户信息（包含偏好）
+		user, err := p.voiceprintMgr.GetUser(name)
+		if err != nil {
+			logger.Warnf("[pipeline] 获取用户信息失败: %v", err)
+			p.contextManager.SetCurrentSpeaker(name, nil)
+		} else {
+			p.contextManager.SetCurrentSpeaker(name, user)
+		}
+	} else {
+		p.contextManager.SetCurrentSpeaker("", nil)
 	}
-	p.contextManager.SetCurrentSpeaker(name)
 }
 
 // enterContinuousMode 进入连续对话模式。
 // 回复完成后不立即回到空闲，而是进入监听状态并启动超时计时器。
 func (p *Pipeline) enterContinuousMode() {
 	// 清空声纹状态
-	p.contextManager.SetCurrentSpeaker("")
+	p.contextManager.SetCurrentSpeaker("", nil)
 	p.voiceprintBufMu.Lock()
 	p.voiceprintBuf = nil
 	p.voiceprintBufMu.Unlock()
@@ -794,6 +912,16 @@ func (p *Pipeline) Close() {
 	}
 
 	logger.Info("[pipeline] 已关闭")
+}
+
+// isVoiceprintTool 检查是否是声纹相关工具（仅主人可用）。
+func isVoiceprintTool(name string) bool {
+	switch name {
+	case "register_voiceprint", "delete_voiceprint", "set_user_preferences":
+		return true
+	default:
+		return false
+	}
 }
 
 // extractSentence 尝试从文本中提取第一个完整句子。

@@ -88,7 +88,9 @@ func (r *Recognizer) GetResult() string {
 // Reset 重置识别流状态，为处理新的语句做准备。
 // 在获取完一个端点的结果后应调用此方法。
 func (r *Recognizer) Reset() {
-	r.recognizer.Reset(r.stream)
+	if r.recognizer != nil && r.stream != nil {
+		r.recognizer.Reset(r.stream)
+	}
 }
 
 // Close 释放底层 sherpa-onnx 资源。调用后不可再使用此 Recognizer。

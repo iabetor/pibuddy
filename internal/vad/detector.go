@@ -78,7 +78,9 @@ func (d *Detector) GetSegment() ([]float32, bool) {
 
 // Reset 重置 VAD 内部状态，为处理新的音频流做准备。
 func (d *Detector) Reset() {
-	d.vad.Clear()
+	if d.vad != nil {
+		d.vad.Clear()
+	}
 }
 
 // Close 释放底层 sherpa-onnx VAD 资源。

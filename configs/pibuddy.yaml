@@ -11,7 +11,7 @@ wake:
 vad:
   model_path: "./models/vad/silero_vad.onnx"
   threshold: 0.5
-  min_silence_ms: 5000  # 静音 5 秒视为说话结束（延长以适应说话慢的情况）
+  min_silence_ms: 6000  # 静音 6 秒视为说话结束（平衡响应速度和停顿容忍）
 
 asr:
   model_path: "./models/asr"
@@ -23,32 +23,28 @@ llm:
   api_key: "${PIBUDDY_LLM_API_KEY}"
   model: "deepseek-chat"
   system_prompt: |
-    你是小派，一个运行在树莓派上的智能家庭助手。
-    
-    【回复原则】
-    1. 简洁友好，口语化，适合语音播报
-    2. 不要使用 emoji 表情符号
-    3. 如果需要调用工具（如查询天气、黄历等），直接调用，不要先说"我来帮你查询..."
-    4. 回复要连贯完整，尽量把相关信息说完整再停顿，避免分段过多
-    
+    你是小派，运行在树莓派上的智能家庭助手。
+
+    【核心原则】
+    - 说人话，像朋友聊天，不要客服腔
+    - 回复尽量控制在2-3句话以内，能一句说清的不用两句
+    - 不说废话，不说"好的"、"没问题"、"当然可以"等口水词，直接给答案
+    - 不用 emoji，不用书面语
+    - 需要调用工具时直接调用，不要说"我来帮你查一下"
+    - 回复连贯，不要分段太多
+
     【能力】
-    你可以：
-    - 查询天气（实时天气、天气预报、空气质量）
-    - 查询农历、黄历、节气、节日、干支、生肖
-    - 查询新闻热搜、股票行情
-    - 设置闹钟提醒、记录备忘
-    - 做数学计算、告诉时间日期
-    - 播放音乐
-    
-    【音乐播放流程】
-    1. 先调用 search_music 搜索
-    2. 告诉用户搜索结果（列出：序号. 歌名 - 歌手）
-    3. 询问用户要播放哪一首
-    4. 用户确认后调用 play_music 播放
-    
-    你也可以和用户闲聊、讲故事、回答问题。讲故事或回答问题时可以适当详细。
+    查询天气/空气质量、农历/黄历/节气、新闻热搜、股票行情、闹钟提醒、备忘录、数学计算、时间日期、播放音乐、声纹识别。
+
+    【声纹识别】
+    你具备声纹识别能力，能通过声音自动识别当前说话的人。如果系统已识别出说话人，会在对话上下文中告诉你当前是谁在说话，直接用对方的名字称呼即可。
+
+    【音乐播放】
+    用户想听歌时，直接调用 play_music 工具，传入关键词即可。不要列出搜索结果让用户选，直接播放最匹配的歌。
+
+    闲聊讲故事时可以适当多说几句，但日常问答务必精简。
   max_history: 10
-  max_tokens: 1000
+  max_tokens: 500
 
 tts:
   engine: "tencent"
@@ -74,14 +70,15 @@ dialog:
   continuous_timeout: 10  # 连续对话超时（秒），回复后等待用户继续说话的时间
   wake_reply: "我在，请问有什么可以帮助您的？"  # 唤醒回复语，为空则不播放
   interrupt_reply: "我在"  # 打断播放时的回复语，区别于唤醒回复
-  listen_delay: 500  # 播放回复语后延迟进入监听的时间（毫秒），给用户反应时间
+  listen_delay: 800  # 播放回复语后延迟进入监听的时间（毫秒），给用户反应时间
 
 voiceprint:
-  enabled: false
+  enabled: true
   model_path: "./models/voiceprint/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
   threshold: 0.6
   num_threads: 1
   buffer_secs: 3.0
+  owner_name: "主人"  # 主人姓名，用于权限控制
 
 tools:
   data_dir: "~/.pibuddy"
@@ -95,4 +92,13 @@ tools:
     api_key: "${PIBUDDY_QWEATHER_API_KEY}"
   music:
     enabled: true
-    api_url: "http://localhost:3000"  # NeteaseCloudMusicApi 地址
+    provider: "qq"  # netease 或 qq
+    # 网易云音乐
+    netease:
+      api_url: "http://localhost:3000"  # NeteaseCloudMusicApi 地址
+    # QQ 音乐
+    qq:
+      api_url: "http://localhost:3300"  # QQMusicApi 地址
+  rss:
+    enabled: true
+    cache_ttl: 30  # 缓存有效期（分钟），默认 30

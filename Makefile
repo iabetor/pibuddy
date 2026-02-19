@@ -1,4 +1,4 @@
-.PHONY: build build-user build-arm64 deploy clean test
+.PHONY: build build-user build-music build-arm64 deploy clean test
 
 BINARY   := pibuddy
 CMD_DIR  := ./cmd/pibuddy
@@ -17,6 +17,11 @@ build-user:
 	@mkdir -p $(OUT_DIR)
 	CGO_ENABLED=1 go build -o $(OUT_DIR)/pibuddy-user ./cmd/user
 	@echo "Built $(OUT_DIR)/pibuddy-user"
+
+build-music:
+	@mkdir -p $(OUT_DIR)
+	go build -o $(OUT_DIR)/pibuddy-music ./cmd/music
+	@echo "Built $(OUT_DIR)/pibuddy-music"
 
 build-arm64:
 	@mkdir -p $(OUT_DIR)

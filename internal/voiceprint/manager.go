@@ -182,6 +182,45 @@ func (m *Manager) NumSpeakers() int {
 	return m.spkMgr.NumSpeakers()
 }
 
+// SetOwner 设置用户为主人。
+func (m *Manager) SetOwner(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.store.SetOwner(name)
+}
+
+// GetOwner 获取主人信息。
+func (m *Manager) GetOwner() (*User, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.store.GetOwner()
+}
+
+// IsOwner 检查指定用户是否是主人。
+func (m *Manager) IsOwner(name string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	user, err := m.store.GetUser(name)
+	if err != nil || user == nil {
+		return false
+	}
+	return user.IsOwner()
+}
+
+// SetPreferences 设置用户偏好。
+func (m *Manager) SetPreferences(name string, preferences string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.store.SetPreferences(name, preferences)
+}
+
+// GetUser 获取用户信息（包含偏好）。
+func (m *Manager) GetUser(name string) (*User, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.store.GetUser(name)
+}
+
 // Close 释放所有资源。
 func (m *Manager) Close() {
 	m.mu.Lock()

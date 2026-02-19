@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/iabetor/pibuddy/internal/music"
@@ -118,26 +119,39 @@ func TestPlayMusicTool_Execute(t *testing.T) {
 		wantMsg  string
 	}{
 		{
-			name:     "成功播放",
-			provider: &MockProvider{urlResult: "http://example.com/song.mp3"},
-			enabled:  true,
-			args:     `{"song_id": 123, "song_name": "晴天", "artist": "周杰伦"}`,
-			wantErr:  false,
-			wantURL:  "http://example.com/song.mp3",
+			name: "成功播放",
+			provider: &MockProvider{
+				searchResult: []music.Song{{ID: 1, Name: "晴天", Artist: "周杰伦", Album: "叶惠美"}},
+				urlResult:    "http://example.com/song.mp3",
+			},
+			enabled: true,
+			args:    `{"keyword": "周杰伦晴天"}`,
+			wantErr: false,
+			wantURL: "http://example.com/song.mp3",
 		},
 		{
 			name:     "服务未启用",
 			provider: nil,
 			enabled:  false,
-			args:     `{"song_id": 123, "song_name": "晴天", "artist": "周杰伦"}`,
+			args:     `{"keyword": "晴天"}`,
 			wantErr:  false,
 			wantMsg:  "音乐服务未启用",
 		},
 		{
-			name:     "缺少 song_id",
+			name: "搜索无结果",
+			provider: &MockProvider{
+				searchResult: []music.Song{},
+			},
+			enabled: true,
+			args:    `{"keyword": "不存在的歌"}`,
+			wantErr: false,
+			wantMsg: "没有找到相关歌曲",
+		},
+		{
+			name:     "缺少关键词",
 			provider: &MockProvider{},
 			enabled:  true,
-			args:     `{"song_id": 0, "song_name": "晴天", "artist": "周杰伦"}`,
+			args:     `{"keyword": ""}`,
 			wantErr:  true,
 		},
 		{
@@ -146,6 +160,20 @@ func TestPlayMusicTool_Execute(t *testing.T) {
 			enabled:  true,
 			args:     `invalid json`,
 			wantErr:  true,
+		},
+		{
+			name: "所有歌曲无法播放则 fallback",
+			provider: &MockProvider{
+				searchResult: []music.Song{
+					{ID: 1, Name: "晴天", Artist: "周杰伦"},
+					{ID: 2, Name: "夜曲", Artist: "周杰伦"},
+				},
+				urlErr: fmt.Errorf("VIP 歌曲"),
+			},
+			enabled: true,
+			args:    `{"keyword": "周杰伦"}`,
+			wantErr: false,
+			wantMsg: "均因版权限制无法播放",
 		},
 	}
 
