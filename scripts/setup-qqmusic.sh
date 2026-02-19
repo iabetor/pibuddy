@@ -1,16 +1,16 @@
 #!/bin/bash
 
-# NeteaseCloudMusicApi 部署脚本
-# 用于安装和配置网易云音乐 API 服务
+# QQAFLMusicApi 部署脚本
+# 用于安装和配置 QQ 音乐 API 服务
 
 set -e
 
-REPO_URL="https://github.com/Binaryify/NeteaseCloudMusicApi.git"
-INSTALL_DIR="${1:-$HOME/NeteaseCloudMusicApi}"
-PORT="${2:-3000}"
+REPO_URL="https://github.com/QiuChenlyOpenSource/QQAFLMusicApi.git"
+INSTALL_DIR="${1:-$HOME/QQAFLMusicApi}"
+PORT="${2:-3300}"
 NPM_REGISTRY="https://registry.npmmirror.com"
 
-echo "=== NeteaseCloudMusicApi 部署脚本 ==="
+echo "=== QQAFLMusicApi 部署脚本 ==="
 echo "安装目录: $INSTALL_DIR"
 echo "服务端口: $PORT"
 echo "NPM 源: $NPM_REGISTRY"
@@ -40,7 +40,7 @@ if [ -d "$INSTALL_DIR" ]; then
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo "删除现有目录..."
         rm -rf "$INSTALL_DIR"
-        echo "克隆 NeteaseCloudMusicApi 仓库..."
+        echo "克隆 QQAFLMusicApi 仓库..."
         git clone "$REPO_URL" "$INSTALL_DIR"
         cd "$INSTALL_DIR"
     else
@@ -48,7 +48,7 @@ if [ -d "$INSTALL_DIR" ]; then
         cd "$INSTALL_DIR"
     fi
 else
-    echo "克隆 NeteaseCloudMusicApi 仓库..."
+    echo "克隆 QQAFLMusicApi 仓库..."
     git clone "$REPO_URL" "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 fi
@@ -61,7 +61,6 @@ npm install --registry="$NPM_REGISTRY"
 # 配置端口
 echo ""
 echo "配置服务端口: $PORT"
-export PORT=$PORT
 
 # 创建启动脚本
 cat > start.sh << EOF
@@ -86,7 +85,9 @@ echo "PiBuddy 配置:"
 echo "  在 configs/pibuddy.yaml 中设置:"
 echo "  music:"
 echo "    enabled: true"
-echo "    api_url: \"http://localhost:$PORT\""
+echo "    provider: \"qq\""
+echo "    qq:"
+echo "      api_url: \"http://localhost:$PORT\""
 echo ""
 
 # 可选：创建 systemd 服务（仅 Linux）
@@ -95,10 +96,10 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     read -p "是否创建 systemd 服务? (y/N): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        SERVICE_FILE="/etc/systemd/system/netease-music-api.service"
+        SERVICE_FILE="/etc/systemd/system/qq-music-api.service"
         sudo tee "$SERVICE_FILE" > /dev/null << EOF
 [Unit]
-Description=NeteaseCloudMusicApi
+Description=QQAFLMusicApi
 After=network.target
 
 [Service]
@@ -115,13 +116,13 @@ WantedBy=multi-user.target
 EOF
 
         sudo systemctl daemon-reload
-        sudo systemctl enable netease-music-api
+        sudo systemctl enable qq-music-api
         echo ""
         echo "Systemd 服务已创建:"
-        echo "  启动: sudo systemctl start netease-music-api"
-        echo "  停止: sudo systemctl stop netease-music-api"
-        echo "  状态: sudo systemctl status netease-music-api"
-        echo "  日志: sudo journalctl -u netease-music-api -f"
+        echo "  启动: sudo systemctl start qq-music-api"
+        echo "  停止: sudo systemctl stop qq-music-api"
+        echo "  状态: sudo systemctl status qq-music-api"
+        echo "  日志: sudo journalctl -u qq-music-api -f"
     fi
 fi
 
