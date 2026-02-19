@@ -484,6 +484,7 @@ func (p *Pipeline) performInterrupt(ctx context.Context) {
 	if p.cfg.Dialog.ListenDelay > 0 {
 		time.Sleep(time.Duration(p.cfg.Dialog.ListenDelay) * time.Millisecond)
 	}
+	p.capture.Drain() // 清空回声残留
 
 	p.state.SetState(StateListening)
 
@@ -505,6 +506,7 @@ func (p *Pipeline) playWakeReply(ctx context.Context) {
 	if p.cfg.Dialog.ListenDelay > 0 {
 		time.Sleep(time.Duration(p.cfg.Dialog.ListenDelay) * time.Millisecond)
 	}
+	p.capture.Drain() // 清空回声残留
 
 	// 播放完成后进入监听状态
 	p.vadDetector.Reset()
@@ -787,6 +789,12 @@ func (p *Pipeline) enterContinuousMode() {
 		p.state.ForceIdle()
 		return
 	}
+
+	// 延迟 + 清空麦克风缓冲，防止扬声器回声被 ASR 识别
+	if p.cfg.Dialog.ListenDelay > 0 {
+		time.Sleep(time.Duration(p.cfg.Dialog.ListenDelay) * time.Millisecond)
+	}
+	p.capture.Drain()
 
 	// 进入监听状态
 	p.vadDetector.Reset()

@@ -110,6 +110,23 @@ func (c *Capture) Stop() {
 	logger.Info("[audio] 麦克风采集已停止")
 }
 
+// Drain 清空采集 channel 中的残留音频帧。
+// 在 Speaking → Listening 转换时调用，避免扬声器回声被 ASR 识别。
+func (c *Capture) Drain() int {
+	n := 0
+	for {
+		select {
+		case <-c.out:
+			n++
+		default:
+			if n > 0 {
+				logger.Debugf("[audio] 清空麦克风缓冲: 丢弃 %d 帧", n)
+			}
+			return n
+		}
+	}
+}
+
 // Close 释放所有资源。
 func (c *Capture) Close() {
 	c.Stop()
