@@ -75,8 +75,11 @@ type VADConfig struct {
 
 // ASRConfig 语音识别配置。
 type ASRConfig struct {
-	ModelPath  string `yaml:"model_path"`
-	NumThreads int    `yaml:"num_threads"`
+	ModelPath              string  `yaml:"model_path"`
+	NumThreads             int     `yaml:"num_threads"`
+	Rule1MinTrailingSilence float64 `yaml:"rule1_min_trailing_silence"` // 尾部静音阈值（秒）
+	Rule2MinTrailingSilence float64 `yaml:"rule2_min_trailing_silence"` // 尾部静音阈值（秒）
+	Rule3MinUtteranceLength float64 `yaml:"rule3_min_utterance_length"` // 最小语音长度（秒）
 }
 
 // LLMConfig 大模型对话配置。
@@ -92,10 +95,12 @@ type LLMConfig struct {
 
 // TTSConfig 语音合成配置。
 type TTSConfig struct {
-	Engine  string        `yaml:"engine"`
-	Edge    EdgeConfig    `yaml:"edge"`
-	Piper   PiperConfig   `yaml:"piper"`
-	Tencent TencentConfig `yaml:"tencent"`
+	Engine        string        `yaml:"engine"`
+	Fallback      string        `yaml:"fallback"` // 回退引擎，当主引擎失败时使用（如 "piper"、"say"）
+	Edge          EdgeConfig    `yaml:"edge"`
+	Piper         PiperConfig   `yaml:"piper"`
+	Say           SayConfig     `yaml:"say"`
+	Tencent       TencentConfig `yaml:"tencent"`
 }
 
 // TencentConfig 腾讯云 TTS 配置。
@@ -117,12 +122,46 @@ type PiperConfig struct {
 	ModelPath string `yaml:"model_path"`
 }
 
+// SayConfig macOS say TTS 配置。
+type SayConfig struct {
+	Voice string `yaml:"voice"` // macOS 语音名称，如 "Tingting"（中文），为空使用系统默认
+}
+
 // ToolsConfig 工具配置。
 type ToolsConfig struct {
-	DataDir string        `yaml:"data_dir"`
-	Weather WeatherConfig `yaml:"weather"`
-	Music   MusicConfig   `yaml:"music"`
-	RSS     RSSConfig     `yaml:"rss"`
+	DataDir      string              `yaml:"data_dir"`
+	Weather      WeatherConfig       `yaml:"weather"`
+	Music        MusicConfig         `yaml:"music"`
+	RSS          RSSConfig           `yaml:"rss"`
+	Timer        TimerConfig         `yaml:"timer"`
+	Volume       VolumeConfig        `yaml:"volume"`
+	Translate    TranslateConfig     `yaml:"translate"`
+	HomeAssistant HomeAssistantConfig `yaml:"home_assistant"`
+}
+
+// HomeAssistantConfig Home Assistant 配置。
+type HomeAssistantConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	URL     string `yaml:"url"`
+	Token   string `yaml:"token"`
+}
+
+// TranslateConfig 翻译配置。
+type TranslateConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	SecretID  string `yaml:"secret_id"`
+	SecretKey string `yaml:"secret_key"`
+	Region    string `yaml:"region"`
+}
+
+// TimerConfig 倒计时配置。
+type TimerConfig struct {
+	MaxConcurrent int `yaml:"max_concurrent"` // 最大同时运行的倒计时数，默认 5
+}
+
+// VolumeConfig 音量控制配置。
+type VolumeConfig struct {
+	Step int `yaml:"step"` // 相对调节步长，默认 10
 }
 
 // RSSConfig RSS 订阅功能配置。
@@ -277,6 +316,16 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Tools.Music.CacheMaxSize == 0 {
 		cfg.Tools.Music.CacheMaxSize = 500 // 默认 500MB
+	}
+
+	// 倒计时默认值
+	if cfg.Tools.Timer.MaxConcurrent == 0 {
+		cfg.Tools.Timer.MaxConcurrent = 5
+	}
+
+	// 音量控制默认值
+	if cfg.Tools.Volume.Step == 0 {
+		cfg.Tools.Volume.Step = 10
 	}
 
 	// 去除 API Key 两端可能的空白（环境变量展开后常见）

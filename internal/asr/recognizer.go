@@ -18,7 +18,10 @@ type Recognizer struct {
 // NewRecognizer 创建流式语音识别器。
 // modelPath: 包含 Zipformer 模型文件（encoder、decoder、joiner ONNX 文件和 tokens.txt）的目录
 // numThreads: 推理引擎使用的 CPU 线程数
-func NewRecognizer(modelPath string, numThreads int) (*Recognizer, error) {
+// rule1MinTrailingSilence: 尾部静音阈值（秒），默认 2.4
+// rule2MinTrailingSilence: 尾部静音阈值（秒），默认 1.2
+// rule3MinUtteranceLength: 最小语音长度（秒），默认 20.0
+func NewRecognizer(modelPath string, numThreads int, rule1MinTrailingSilence, rule2MinTrailingSilence, rule3MinUtteranceLength float64) (*Recognizer, error) {
 	config := sherpa.OnlineRecognizerConfig{}
 
 	// 特征提取配置
@@ -41,9 +44,22 @@ func NewRecognizer(modelPath string, numThreads int) (*Recognizer, error) {
 
 	// 端点检测设置
 	config.EnableEndpoint = 1
-	config.Rule1MinTrailingSilence = 2.4
-	config.Rule2MinTrailingSilence = 1.2
-	config.Rule3MinUtteranceLength = 20.0
+	// 使用传入参数，如果为 0 则使用默认值
+	if rule1MinTrailingSilence > 0 {
+		config.Rule1MinTrailingSilence = float32(rule1MinTrailingSilence)
+	} else {
+		config.Rule1MinTrailingSilence = 2.4
+	}
+	if rule2MinTrailingSilence > 0 {
+		config.Rule2MinTrailingSilence = float32(rule2MinTrailingSilence)
+	} else {
+		config.Rule2MinTrailingSilence = 1.2
+	}
+	if rule3MinUtteranceLength > 0 {
+		config.Rule3MinUtteranceLength = float32(rule3MinUtteranceLength)
+	} else {
+		config.Rule3MinUtteranceLength = 20.0
+	}
 
 	recognizer := sherpa.NewOnlineRecognizer(&config)
 	if recognizer == nil {

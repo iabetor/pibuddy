@@ -16,6 +16,10 @@ vad:
 asr:
   model_path: "./models/asr"
   num_threads: 4  # 增加解码线程数，加速 decode，减少 buffer 积压
+  # 端点检测设置（控制说话停顿多久视为结束）
+  rule1_min_trailing_silence: 6.0  # 尾部静音 >= 6 秒触发 endpoint（宽松）
+  rule2_min_trailing_silence: 3.0  # 尾部静音 >= 3 秒触发 endpoint（适中）
+  rule3_min_utterance_length: 20.0  # 语音长度 >= 20 秒强制触发 endpoint
 
 llm:
   provider: "openai"
@@ -34,7 +38,18 @@ llm:
     - 回复连贯，不要分段太多
 
     【能力】
-    查询天气/空气质量、农历/黄历/节气、新闻热搜、股票行情、闹钟提醒、备忘录、数学计算、时间日期、播放音乐、声纹识别。
+    查询天气/空气质量、农历/黄历/节气、新闻热搜、股票行情、闹钟提醒、备忘录、数学计算、时间日期、播放音乐、声纹识别、倒计时器、音量控制、翻译、智能家居控制。
+
+    【翻译】
+    用户需要翻译时，调用 translate 工具，传入待翻译文本和目标语言。支持中、英、日、韩等多种语言。
+
+    【智能家居】
+    用户想控制智能家居设备时：
+    1. **必须先调用 ha_list_devices 列出设备**，获取正确的 entity_id
+    2. **不要自己构造 entity_id**，必须从列表中选择
+    3. 调用 ha_control_device 控制设备（开/关/调亮度/设温度）
+    4. 调用 ha_get_device_state 查询设备状态
+    支持灯光、开关、空调、风扇、窗帘等设备。
 
     【声纹识别】
     你具备声纹识别能力，能通过声音自动识别当前说话的人。如果系统已识别出说话人，会在对话上下文中告诉你当前是谁在说话，直接用对方的名字称呼即可。
@@ -42,12 +57,19 @@ llm:
     【音乐播放】
     用户想听歌时，直接调用 play_music 工具，传入关键词即可。不要列出搜索结果让用户选，直接播放最匹配的歌。
 
+    【倒计时器】
+    用户想设置倒计时时，调用 set_timer 工具，传入 duration_seconds（秒数）。LLM负责将自然语言时间转换为秒数（如"5分钟"=300秒、"1分30秒"=90秒）。
+
+    【音量控制】
+    用户想调节音量时，调用 set_volume 工具。volume 为绝对值(0-100)，relative 为 true 时为相对调节。
+
     闲聊讲故事时可以适当多说几句，但日常问答务必精简。
   max_history: 10
   max_tokens: 500
 
 tts:
   engine: "tencent"
+  fallback: "say"  # 回退引擎，macOS 使用 say 命令，Linux 使用 piper
   tencent:
     secret_id: "${PIBUDDY_TENCENT_SECRET_ID}"
     secret_key: "${PIBUDDY_TENCENT_SECRET_KEY}"
@@ -58,9 +80,11 @@ tts:
     voice: "zh-CN-XiaoxiaoNeural"
   piper:
     model_path: "./models/piper/zh_CN-huayan-medium.onnx"
+  say:
+    voice: "Tingting"  # macOS 中文语音，为空使用系统默认
 
 log:
-  level: "info"
+  level: "debug"
   # file: "/var/log/pibuddy/pibuddy.log"  # 日志文件路径，注释掉则只输出到控制台
   max_size: 64      # 单个日志文件最大 64MB
   max_backups: 3    # 保留 3 个旧日志文件
@@ -70,7 +94,7 @@ dialog:
   continuous_timeout: 10  # 连续对话超时（秒），回复后等待用户继续说话的时间
   wake_reply: "我在，请问有什么可以帮助您的？"  # 唤醒回复语，为空则不播放
   interrupt_reply: "我在"  # 打断播放时的回复语，区别于唤醒回复
-  listen_delay: 800  # 播放回复语后延迟进入监听的时间（毫秒），给用户反应时间
+  listen_delay: 500  # 播放回复语后延迟进入监听的时间（毫秒），给用户反应时间
 
 voiceprint:
   enabled: true
@@ -104,3 +128,24 @@ tools:
   rss:
     enabled: true
     cache_ttl: 30  # 缓存有效期（分钟），默认 30
+
+  # 倒计时器配置
+  timer:
+    max_concurrent: 5  # 最大同时运行的倒计时数
+
+  # 音量控制配置
+  volume:
+    step: 10  # 相对调节步长（如"调大音量"增加10%）
+
+  # 翻译配置（腾讯云机器翻译）
+  translate:
+    enabled: true
+    secret_id: "${PIBUDDY_TENCENT_SECRET_ID}"
+    secret_key: "${PIBUDDY_TENCENT_SECRET_KEY}"
+    region: "ap-guangzhou"
+
+  # Home Assistant 智能家居配置
+  home_assistant:
+    enabled: true
+    url: "http://localhost:8123"
+    token: "${PIBUDDY_HA_TOKEN}"

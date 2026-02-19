@@ -39,10 +39,13 @@ type Pipeline struct {
 	llmProvider    llm.Provider
 	contextManager *llm.ContextManager
 
-	ttsEngine tts.Engine
+	ttsEngine        tts.Engine
+	fallbackTtsEngine tts.Engine // 回退 TTS 引擎（网络失败时使用）
 
 	toolRegistry *tools.Registry
 	alarmStore   *tools.AlarmStore
+	timerStore   *tools.TimerStore
+	volumeCtrl   tools.VolumeController
 
 	state *StateMachine
 
@@ -119,7 +122,13 @@ func New(cfg *config.Config) (*Pipeline, error) {
 	}
 
 	// 流式语音识别
-	p.recognizer, err = asr.NewRecognizer(cfg.ASR.ModelPath, cfg.ASR.NumThreads)
+	p.recognizer, err = asr.NewRecognizer(
+		cfg.ASR.ModelPath,
+		cfg.ASR.NumThreads,
+		cfg.ASR.Rule1MinTrailingSilence,
+		cfg.ASR.Rule2MinTrailingSilence,
+		cfg.ASR.Rule3MinUtteranceLength,
+	)
 	if err != nil {
 		p.Close()
 		return nil, fmt.Errorf("初始化 ASR 失败: %w", err)
@@ -147,9 +156,30 @@ func New(cfg *config.Config) (*Pipeline, error) {
 		p.ttsEngine = tts.NewEdgeEngine(cfg.TTS.Edge.Voice)
 	case "piper":
 		p.ttsEngine = tts.NewPiperEngine(cfg.TTS.Piper.ModelPath)
+	case "say":
+		p.ttsEngine = tts.NewSayEngine(cfg.TTS.Say.Voice)
 	default:
 		p.Close()
 		return nil, fmt.Errorf("未知的 TTS 引擎: %s", cfg.TTS.Engine)
+	}
+
+	// 初始化备用 TTS 引擎（网络失败时使用）
+	if cfg.TTS.Fallback != "" && cfg.TTS.Fallback != cfg.TTS.Engine {
+		switch cfg.TTS.Fallback {
+		case "piper":
+			if cfg.TTS.Piper.ModelPath != "" {
+				p.fallbackTtsEngine = tts.NewPiperEngine(cfg.TTS.Piper.ModelPath)
+				logger.Info("[pipeline] 已启用 TTS 回退引擎: piper")
+			}
+		case "edge":
+			p.fallbackTtsEngine = tts.NewEdgeEngine(cfg.TTS.Edge.Voice)
+			logger.Info("[pipeline] 已启用 TTS 回退引擎: edge")
+		case "say":
+			p.fallbackTtsEngine = tts.NewSayEngine(cfg.TTS.Say.Voice)
+			logger.Info("[pipeline] 已启用 TTS 回退引擎: say (macOS)")
+		default:
+			logger.Warnf("[pipeline] 未知的 TTS 回退引擎: %s", cfg.TTS.Fallback)
+		}
 	}
 
 	// 初始化工具
@@ -327,6 +357,63 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 		p.toolRegistry.Register(tools.NewSetPreferencesTool(vpCfg))
 	}
 
+	// 倒计时工具
+	p.timerStore, err = tools.NewTimerStore(cfg.Tools.DataDir, func(entry tools.TimerEntry) {
+		// 倒计时到期回调
+		logger.Infof("[pipeline] 倒计时到期: %s", entry.ID)
+		var msg string
+		if entry.Label != "" {
+			msg = fmt.Sprintf("%s提醒时间到了", entry.Label)
+		} else {
+			msg = "倒计时结束了"
+		}
+		p.speakText(context.Background(), msg)
+	})
+	if err != nil {
+		return fmt.Errorf("初始化倒计时存储失败: %w", err)
+	}
+	p.toolRegistry.Register(tools.NewSetTimerTool(p.timerStore))
+	p.toolRegistry.Register(tools.NewListTimersTool(p.timerStore))
+	p.toolRegistry.Register(tools.NewCancelTimerTool(p.timerStore))
+
+	// 音量控制工具
+	p.volumeCtrl, err = tools.NewVolumeController()
+	if err != nil {
+		logger.Warnf("[pipeline] 音量控制器初始化失败（已禁用）: %v", err)
+	} else {
+		p.toolRegistry.Register(tools.NewSetVolumeTool(p.volumeCtrl, tools.VolumeConfig{
+			Step: cfg.Tools.Volume.Step,
+		}))
+		p.toolRegistry.Register(tools.NewGetVolumeTool(p.volumeCtrl))
+	}
+
+	// 翻译工具
+	if cfg.Tools.Translate.Enabled && cfg.Tools.Translate.SecretID != "" {
+		translateTool, err := tools.NewTranslateTool(
+			cfg.Tools.Translate.SecretID,
+			cfg.Tools.Translate.SecretKey,
+			cfg.Tools.Translate.Region,
+		)
+		if err != nil {
+			logger.Warnf("[pipeline] 翻译工具初始化失败: %v", err)
+		} else {
+			p.toolRegistry.Register(translateTool)
+			logger.Info("[pipeline] 翻译工具已启用")
+		}
+	}
+
+	// Home Assistant 智能家居工具
+	if cfg.Tools.HomeAssistant.Enabled && cfg.Tools.HomeAssistant.URL != "" {
+		haClient := tools.NewHomeAssistantClient(
+			cfg.Tools.HomeAssistant.URL,
+			cfg.Tools.HomeAssistant.Token,
+		)
+		p.toolRegistry.Register(tools.NewHAListDevicesTool(haClient))
+		p.toolRegistry.Register(tools.NewHAGetDeviceStateTool(haClient))
+		p.toolRegistry.Register(tools.NewHAControlDeviceTool(haClient))
+		logger.Info("[pipeline] Home Assistant 智能家居工具已启用")
+	}
+
 	logger.Infof("[pipeline] 已注册 %d 个工具", p.toolRegistry.Count())
 	return nil
 }
@@ -426,6 +513,11 @@ func (p *Pipeline) handleIdle(ctx context.Context, frame []float32) {
 			go p.playWakeReply(ctx)
 		} else {
 			p.state.Transition(StateListening)
+			// 启动连续对话超时计时器
+			if p.cfg.Dialog.ContinuousTimeout > 0 {
+				p.startContinuousTimer()
+				logger.Infof("[pipeline] 进入连续对话模式，%d 秒内无输入将回到空闲", p.cfg.Dialog.ContinuousTimeout)
+			}
 			// 1秒后解除冷却期
 			time.AfterFunc(1*time.Second, p.clearWakeCooldown)
 		}
@@ -532,6 +624,12 @@ func (p *Pipeline) playWakeReply(ctx context.Context) {
 	p.recognizer.Reset()
 	p.state.SetState(StateListening)
 
+	// 启动连续对话超时计时器
+	if p.cfg.Dialog.ContinuousTimeout > 0 {
+		p.startContinuousTimer()
+		logger.Infof("[pipeline] 进入连续对话模式，%d 秒内无输入将回到空闲", p.cfg.Dialog.ContinuousTimeout)
+	}
+
 	// 解除冷却期（延迟一点，确保不会立即重复检测）
 	time.AfterFunc(500*time.Millisecond, p.clearWakeCooldown)
 }
@@ -564,11 +662,9 @@ func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
 	text := p.recognizer.GetResult()
 	if text != "" {
 		logger.Debugf("[pipeline] 实时识别: %s", text)
+		// ASR 有实时文本输出，说明有人在说话，重置超时计时器
+		p.resetContinuousTimer()
 	}
-
-	// 注意：不再根据 VAD 活动重置计时器
-	// VAD 对噪音敏感会导致计时器被反复重置，实际超时远超配置值
-	// 超时逻辑现在是：进入监听后固定时间无有效 ASR 输出就超时
 
 	if p.recognizer.IsEndpoint() {
 		finalText := p.recognizer.GetResult()
@@ -630,7 +726,8 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 	p.contextManager.Add("user", query)
 
 	toolDefs := p.toolRegistry.Definitions()
-	maxRounds := 3
+	maxRounds := 5 // 最多 5 轮 LLM 调用（工具调用可能多轮，最后需要一轮生成回复）
+	var lastHadToolCalls bool
 
 	for round := 0; round < maxRounds; round++ {
 		// 检查打断
@@ -643,6 +740,11 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 		textCh, resultCh, err := p.llmProvider.ChatStreamWithTools(queryCtx, messages, toolDefs)
 		if err != nil {
 			logger.Errorf("[pipeline] LLM 调用失败: %v", err)
+			// 使用备用 TTS 播放错误提示
+			if p.fallbackTtsEngine != nil {
+				p.state.SetState(StateSpeaking)
+				p.speakText(ctx, "网络连接失败，请检查网络设置")
+			}
 			p.state.ForceIdle()
 			return
 		}
@@ -672,6 +774,7 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 
 		// 如果没有工具调用，合并短句后 TTS 播放
 		if len(result.ToolCalls) == 0 {
+			lastHadToolCalls = false
 			replyText := strings.TrimSpace(fullReply.String())
 			if replyText != "" && !p.interrupted.Load() {
 				p.state.Transition(StateSpeaking)
@@ -690,6 +793,7 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 		}
 
 		// 有工具调用 — 丢弃前言文本（如"我来帮你查询..."）
+		lastHadToolCalls = true
 		preamble := strings.TrimSpace(fullReply.String())
 		if preamble != "" {
 			logger.Debugf("[pipeline] 检测到工具调用，丢弃前言文本: %s", preamble)
@@ -759,6 +863,11 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 			}
 		}
 		// 继续下一轮 LLM 调用
+	}
+
+	// 如果最后一轮仍有工具调用，说明达到最大轮数限制，可能未完成回复
+	if lastHadToolCalls {
+		logger.Warnf("[pipeline] 达到最大轮数 %d，可能未完成回复", maxRounds)
 	}
 
 	// 回复完成后进入连续对话模式（等待用户继续说）
@@ -862,16 +971,32 @@ func (p *Pipeline) resetContinuousTimer() {
 }
 
 // speakText 合成并播放单段文本。
+// 如果主 TTS 引擎失败且有备用引擎，则使用备用引擎播放错误提示。
 func (p *Pipeline) speakText(ctx context.Context, text string) {
 	samples, sampleRate, err := p.ttsEngine.Synthesize(ctx, text)
 	if err != nil {
 		logger.Errorf("[pipeline] TTS 合成失败: %v", err)
+		// 尝试使用备用引擎播放错误提示
+		if p.fallbackTtsEngine != nil {
+			fallbackText := "语音合成失败，请检查网络连接"
+			if fbSamples, fbRate, fbErr := p.fallbackTtsEngine.Synthesize(ctx, fallbackText); fbErr == nil && len(fbSamples) > 0 {
+				logger.Info("[pipeline] 使用备用 TTS 引擎播放错误提示")
+				p.playSamples(ctx, fbSamples, fbRate)
+			} else if fbErr != nil {
+				logger.Errorf("[pipeline] 备用 TTS 也失败: %v", fbErr)
+			}
+		}
 		return
 	}
 	if len(samples) == 0 {
 		return
 	}
 
+	p.playSamples(ctx, samples, sampleRate)
+}
+
+// playSamples 播放音频样本。
+func (p *Pipeline) playSamples(ctx context.Context, samples []float32, sampleRate int) {
 	speakCtx, cancel := context.WithCancel(ctx)
 	p.speakMu.Lock()
 	p.cancelSpeak = cancel
@@ -886,7 +1011,6 @@ func (p *Pipeline) speakText(ctx context.Context, text string) {
 
 	if err := p.player.Play(speakCtx, samples, sampleRate); err != nil && err != context.Canceled {
 		logger.Errorf("[pipeline] 播放失败: %v", err)
-		return
 	}
 }
 
