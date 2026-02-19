@@ -566,10 +566,9 @@ func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
 		logger.Debugf("[pipeline] 实时识别: %s", text)
 	}
 
-	// 检测到语音活动，重置连续对话超时计时器
-	if p.vadDetector.IsSpeech() {
-		p.resetContinuousTimer()
-	}
+	// 注意：不再根据 VAD 活动重置计时器
+	// VAD 对噪音敏感会导致计时器被反复重置，实际超时远超配置值
+	// 超时逻辑现在是：进入监听后固定时间无有效 ASR 输出就超时
 
 	if p.recognizer.IsEndpoint() {
 		finalText := p.recognizer.GetResult()
