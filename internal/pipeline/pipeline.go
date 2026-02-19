@@ -46,6 +46,7 @@ type Pipeline struct {
 	alarmStore   *tools.AlarmStore
 	timerStore   *tools.TimerStore
 	volumeCtrl   tools.VolumeController
+	healthStore  *tools.HealthStore
 
 	state *StateMachine
 
@@ -417,6 +418,23 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 	// 系统状态工具
 	p.toolRegistry.Register(tools.NewSystemStatusTool())
 
+	// 健康提醒工具
+	if cfg.Tools.Health.Enabled {
+		healthStore, err := tools.NewHealthStore(cfg.Tools.DataDir, tools.HealthStoreConfig{
+			WaterInterval:    cfg.Tools.Health.WaterInterval,
+			ExerciseInterval: cfg.Tools.Health.ExerciseInterval,
+			QuietHoursStart:  cfg.Tools.Health.QuietHours.Start,
+			QuietHoursEnd:    cfg.Tools.Health.QuietHours.End,
+		})
+		if err != nil {
+			return fmt.Errorf("初始化健康提醒存储失败: %w", err)
+		}
+		p.healthStore = healthStore
+		p.toolRegistry.Register(tools.NewSetHealthReminderTool(healthStore))
+		p.toolRegistry.Register(tools.NewListHealthRemindersTool(healthStore))
+		logger.Info("[pipeline] 健康提醒工具已启用")
+	}
+
 	logger.Infof("[pipeline] 已注册 %d 个工具", p.toolRegistry.Count())
 	return nil
 }
@@ -429,6 +447,11 @@ func (p *Pipeline) Run(ctx context.Context) error {
 
 	// 启动闹钟检查 goroutine
 	go p.alarmChecker(ctx)
+
+	// 启动健康提醒检查 goroutine
+	if p.healthStore != nil {
+		go p.healthReminderChecker(ctx)
+	}
 
 	logger.Info("[pipeline] 已启动 — 请说唤醒词开始对话！")
 
@@ -460,6 +483,28 @@ func (p *Pipeline) alarmChecker(ctx context.Context) {
 				logger.Infof("[pipeline] 闹钟到期: %s", a.Message)
 				msg := fmt.Sprintf("闹钟提醒: %s", a.Message)
 				p.speakText(ctx, msg)
+			}
+		}
+	}
+}
+
+// healthReminderChecker 每分钟检查一次健康提醒。
+func (p *Pipeline) healthReminderChecker(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if p.healthStore == nil {
+				continue
+			}
+			reminders := p.healthStore.CheckAndTrigger()
+			for _, r := range reminders {
+				logger.Infof("[pipeline] 健康提醒: %s", r.Message)
+				p.speakText(ctx, r.Message)
 			}
 		}
 	}

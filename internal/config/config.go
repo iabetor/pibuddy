@@ -129,14 +129,29 @@ type SayConfig struct {
 
 // ToolsConfig 工具配置。
 type ToolsConfig struct {
-	DataDir      string              `yaml:"data_dir"`
-	Weather      WeatherConfig       `yaml:"weather"`
-	Music        MusicConfig         `yaml:"music"`
-	RSS          RSSConfig           `yaml:"rss"`
-	Timer        TimerConfig         `yaml:"timer"`
-	Volume       VolumeConfig        `yaml:"volume"`
-	Translate    TranslateConfig     `yaml:"translate"`
+	DataDir       string              `yaml:"data_dir"`
+	Weather       WeatherConfig       `yaml:"weather"`
+	Music         MusicConfig         `yaml:"music"`
+	RSS           RSSConfig           `yaml:"rss"`
+	Timer         TimerConfig         `yaml:"timer"`
+	Volume        VolumeConfig        `yaml:"volume"`
+	Translate     TranslateConfig     `yaml:"translate"`
 	HomeAssistant HomeAssistantConfig `yaml:"home_assistant"`
+	Health        HealthConfig        `yaml:"health"`
+}
+
+// HealthConfig 健康提醒配置。
+type HealthConfig struct {
+	Enabled          bool             `yaml:"enabled"`
+	WaterInterval    int              `yaml:"water_interval"`    // 默认喝水间隔（分钟）
+	ExerciseInterval int              `yaml:"exercise_interval"` // 默认久坐间隔（分钟）
+	QuietHours       QuietHoursConfig `yaml:"quiet_hours"`
+}
+
+// QuietHoursConfig 静音时段配置。
+type QuietHoursConfig struct {
+	Start string `yaml:"start"` // 静音开始时间，如 "23:00"
+	End   string `yaml:"end"`   // 静音结束时间，如 "07:00"
 }
 
 // HomeAssistantConfig Home Assistant 配置。
