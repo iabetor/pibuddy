@@ -414,6 +414,9 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 		logger.Info("[pipeline] Home Assistant 智能家居工具已启用")
 	}
 
+	// 系统状态工具
+	p.toolRegistry.Register(tools.NewSystemStatusTool())
+
 	logger.Infof("[pipeline] 已注册 %d 个工具", p.toolRegistry.Count())
 	return nil
 }
