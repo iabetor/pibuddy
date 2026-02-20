@@ -725,15 +725,15 @@ func (p *Pipeline) performInterrupt(ctx context.Context) {
 	// 再次清空缓冲（播放"我在"期间的回声）
 	p.capture.Drain()
 	// 音乐播放后的回声需要更长时间消散，额外等待
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	p.capture.Drain()
 	// 最后再重置一次 VAD/ASR，确保没有残留状态
 	p.vadDetector.Reset()
 	p.recognizer.Reset()
 
-	// 设置静默期：接下来的 800ms 内丢弃所有音频帧，让回声完全消散
+	// 设置静默期：接下来的 400ms 内丢弃所有音频帧，让回声完全消散
 	p.echoSilenceMu.Lock()
-	p.echoSilenceUntil = time.Now().Add(800 * time.Millisecond)
+	p.echoSilenceUntil = time.Now().Add(400 * time.Millisecond)
 	p.echoSilenceMu.Unlock()
 
 	p.state.SetState(StateListening)
