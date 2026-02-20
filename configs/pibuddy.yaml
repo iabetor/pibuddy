@@ -184,3 +184,12 @@ tools:
     app_key: "${PIBUDDY_EZVIZ_AK}"
     app_secret: "${PIBUDDY_EZVIZ_SK}"
     device_serial: "BC6385600"   # 默认门锁序列号
+
+  # 学习工具配置
+  learning:
+    enabled: true
+    english:
+      enabled: true  # 英语学习（单词查询、每日一句、生词本、单词测验）
+    poetry:
+      enabled: true  # 古诗词（每日一诗、诗词搜索、飞花令、诗词接龙）
+      api_key: ""    # 诗词六六六 API Key（可选，免费版无需）

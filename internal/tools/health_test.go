@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
@@ -110,11 +111,11 @@ func TestHealthStore(t *testing.T) {
 
 func TestQuietHours(t *testing.T) {
 	tests := []struct {
-		name      string
-		start     string
-		end       string
-		now       string // HH:MM
-		isQuiet   bool
+		name    string
+		start   string
+		end     string
+		now     string // HH:MM
+		isQuiet bool
 	}{
 		{"跨天-夜间", "23:00", "07:00", "02:00", true},
 		{"跨天-白天", "23:00", "07:00", "14:00", false},
@@ -206,7 +207,7 @@ func TestHealthTools(t *testing.T) {
 		tool := NewSetHealthReminderTool(store)
 
 		// 测试开启喝水提醒
-		result, err := tool.Execute(nil, []byte(`{"reminder_type": "water", "action": "start", "interval_minutes": 90}`))
+		result, err := tool.Execute(context.TODO(), []byte(`{"reminder_type": "water", "action": "start", "interval_minutes": 90}`))
 		if err != nil {
 			t.Fatalf("执行失败: %v", err)
 		}
@@ -215,7 +216,7 @@ func TestHealthTools(t *testing.T) {
 		}
 
 		// 测试查看状态
-		result, err = tool.Execute(nil, []byte(`{"reminder_type": "water", "action": "status"}`))
+		result, err = tool.Execute(context.TODO(), []byte(`{"reminder_type": "water", "action": "status"}`))
 		if err != nil {
 			t.Fatalf("执行失败: %v", err)
 		}
@@ -224,7 +225,7 @@ func TestHealthTools(t *testing.T) {
 		}
 
 		// 测试关闭提醒
-		result, err = tool.Execute(nil, []byte(`{"reminder_type": "water", "action": "stop"}`))
+		result, err = tool.Execute(context.TODO(), []byte(`{"reminder_type": "water", "action": "stop"}`))
 		if err != nil {
 			t.Fatalf("执行失败: %v", err)
 		}
@@ -234,7 +235,7 @@ func TestHealthTools(t *testing.T) {
 	t.Run("MedicineReminder", func(t *testing.T) {
 		tool := NewSetHealthReminderTool(store)
 
-		result, err := tool.Execute(nil, []byte(`{"reminder_type": "medicine", "action": "start", "medicine_name": "维生素", "times": ["08:00", "12:00", "18:00"]}`))
+		result, err := tool.Execute(context.TODO(), []byte(`{"reminder_type": "medicine", "action": "start", "medicine_name": "维生素", "times": ["08:00", "12:00", "18:00"]}`))
 		if err != nil {
 			t.Fatalf("执行失败: %v", err)
 		}
@@ -245,7 +246,7 @@ func TestHealthTools(t *testing.T) {
 	t.Run("ListHealthRemindersTool", func(t *testing.T) {
 		tool := NewListHealthRemindersTool(store)
 
-		result, err := tool.Execute(nil, []byte(`{}`))
+		result, err := tool.Execute(context.TODO(), []byte(`{}`))
 		if err != nil {
 			t.Fatalf("执行失败: %v", err)
 		}

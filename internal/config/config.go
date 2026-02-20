@@ -139,6 +139,25 @@ type ToolsConfig struct {
 	HomeAssistant HomeAssistantConfig `yaml:"home_assistant"`
 	Health        HealthConfig        `yaml:"health"`
 	Ezviz         EzvizConfig         `yaml:"ezviz"`
+	Learning      LearningConfig      `yaml:"learning"`
+}
+
+// LearningConfig 学习工具配置。
+type LearningConfig struct {
+	Enabled bool             `yaml:"enabled"`
+	English EnglishConfig    `yaml:"english"`
+	Poetry  PoetryAPIConfig  `yaml:"poetry"`
+}
+
+// EnglishConfig 英语学习配置。
+type EnglishConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// PoetryAPIConfig 古诗词配置。
+type PoetryAPIConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	APIKey  string `yaml:"api_key"` // 诗词六六六 API Key（可选）
 }
 
 // EzvizConfig 萤石开放平台配置。

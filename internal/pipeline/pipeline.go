@@ -444,6 +444,29 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 		logger.Info("[pipeline] 健康提醒工具已启用")
 	}
 
+	// 学习工具
+	if cfg.Tools.Learning.Enabled {
+		// 拼音工具（本地库，无需配置）
+		p.toolRegistry.Register(tools.NewPinyinTool())
+
+		// 英语学习工具
+		if cfg.Tools.Learning.English.Enabled {
+			p.toolRegistry.Register(tools.NewEnglishWordTool())
+			p.toolRegistry.Register(tools.NewEnglishDailyTool())
+			p.toolRegistry.Register(tools.NewVocabularyTool(cfg.Tools.DataDir))
+			p.toolRegistry.Register(tools.NewEnglishQuizTool(cfg.Tools.DataDir))
+			logger.Info("[pipeline] 英语学习工具已启用")
+		}
+
+		// 古诗词工具
+		if cfg.Tools.Learning.Poetry.Enabled {
+			p.toolRegistry.Register(tools.NewPoetryDailyTool(cfg.Tools.Learning.Poetry.APIKey))
+			p.toolRegistry.Register(tools.NewPoetrySearchTool(cfg.Tools.Learning.Poetry.APIKey))
+			p.toolRegistry.Register(tools.NewPoetryGameTool(cfg.Tools.Learning.Poetry.APIKey))
+			logger.Info("[pipeline] 古诗词工具已启用")
+		}
+	}
+
 	logger.Infof("[pipeline] 已注册 %d 个工具", p.toolRegistry.Count())
 	return nil
 }

@@ -81,7 +81,10 @@ func TestNewsTool_EmptyResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	resp, _ := http.Get(server.URL)
+	resp, err := http.Get(server.URL)
+	if err != nil {
+		t.Fatalf("failed to get mock server: %v", err)
+	}
 	defer resp.Body.Close()
 
 	var qqResp qqNewsResp
