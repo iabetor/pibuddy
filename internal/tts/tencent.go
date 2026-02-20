@@ -5,8 +5,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
-	"github.com/iabetor/pibuddy/internal/logger"
 	"regexp"
 	"strings"
 
@@ -14,9 +14,18 @@ import (
 	"github.com/hajimehoshi/go-mp3"
 	tts "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/tts/v20190823"
 
+	"github.com/iabetor/pibuddy/internal/logger"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 )
+
+// ErrInsufficientBalance 表示余额不足错误。
+var ErrInsufficientBalance = errors.New("余额不足")
+
+// IsInsufficientBalance 检查是否为余额不足错误。
+func IsInsufficientBalance(err error) bool {
+	return errors.Is(err, ErrInsufficientBalance)
+}
 
 // TencentEngine 使用腾讯云 TTS 实现语音合成。
 // 适用于中国大陆网络环境，支持多种中文音色。
@@ -128,6 +137,19 @@ func (e *TencentEngine) Synthesize(ctx context.Context, text string) ([]float32,
 
 	response, err := e.client.TextToVoice(request)
 	if err != nil {
+		// 检查是否为余额不足错误
+		// 腾讯云 TTS 官方错误码：
+		// - UnsupportedOperation.AccountArrears: 欠费
+		// - UnsupportedOperation.NoBanlance: 没有余额（注意腾讯云拼写是Banlance）
+		// - UnsupportedOperation.NoFreeAccount: 免费资源包已用尽
+		// - UnsupportedOperation.PkgExhausted: 资源包余量已用尽
+		errStr := err.Error()
+		if strings.Contains(errStr, "AccountArrears") ||
+			strings.Contains(errStr, "NoBanlance") ||
+			strings.Contains(errStr, "NoFreeAccount") ||
+			strings.Contains(errStr, "PkgExhausted") {
+			return nil, 0, fmt.Errorf("[tts] 腾讯云 TTS 合成失败: %w: %w", err, ErrInsufficientBalance)
+		}
 		return nil, 0, fmt.Errorf("[tts] 腾讯云 TTS 合成失败: %w", err)
 	}
 

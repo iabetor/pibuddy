@@ -75,11 +75,35 @@ type VADConfig struct {
 
 // ASRConfig 语音识别配置。
 type ASRConfig struct {
+	// Priority 引擎优先级列表，按顺序尝试，额度用完自动切换到下一个。
+	// 可选值：tencent-flash（腾讯云一句话）、tencent-rt（腾讯云实时）、sherpa（离线）
+	// 默认为 ["tencent-flash", "tencent-rt", "sherpa"]
+	// sherpa 始终作为最终兜底，即使未列出也会自动添加。
+	Priority []string `yaml:"priority"`
+
+	// Provider 主引擎类型（兼容旧配置，优先使用 priority）
+	Provider string `yaml:"provider"`
+
+	// Fallback 兜底引擎（兼容旧配置，优先使用 priority）
+	Fallback string `yaml:"fallback"`
+
+	// 离线引擎配置（sherpa-onnx）
 	ModelPath              string  `yaml:"model_path"`
 	NumThreads             int     `yaml:"num_threads"`
 	Rule1MinTrailingSilence float64 `yaml:"rule1_min_trailing_silence"` // 尾部静音阈值（秒）
 	Rule2MinTrailingSilence float64 `yaml:"rule2_min_trailing_silence"` // 尾部静音阈值（秒）
 	Rule3MinUtteranceLength float64 `yaml:"rule3_min_utterance_length"` // 最小语音长度（秒）
+
+	// 腾讯云配置（可复用 TTS 的密钥）
+	Tencent ASRTencentConfig `yaml:"tencent"`
+}
+
+// ASRTencentConfig 腾讯云 ASR 配置。
+type ASRTencentConfig struct {
+	SecretID  string `yaml:"secret_id"`
+	SecretKey string `yaml:"secret_key"`
+	Region    string `yaml:"region"`  // 默认 ap-guangzhou
+	AppID     string `yaml:"app_id"`  // 实时语音识别需要
 }
 
 // LLMConfig 大模型对话配置。
@@ -291,6 +315,46 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.ASR.NumThreads == 0 {
 		cfg.ASR.NumThreads = 2
+	}
+	// ASR 多引擎优先级默认值
+	if len(cfg.ASR.Priority) == 0 {
+		// 兼容旧配置：从 provider + fallback 构建优先级列表
+		if cfg.ASR.Provider != "" {
+			cfg.ASR.Priority = append(cfg.ASR.Priority, cfg.ASR.Provider)
+		}
+		if cfg.ASR.Fallback != "" && cfg.ASR.Fallback != cfg.ASR.Provider {
+			cfg.ASR.Priority = append(cfg.ASR.Priority, cfg.ASR.Fallback)
+		}
+		// 确保 sherpa 在列表中
+		hasSherpa := false
+		for _, p := range cfg.ASR.Priority {
+			if p == "sherpa" {
+				hasSherpa = true
+				break
+			}
+		}
+		if !hasSherpa {
+			cfg.ASR.Priority = append(cfg.ASR.Priority, "sherpa")
+		}
+		// 如果列表仍为空，使用默认值
+		if len(cfg.ASR.Priority) == 0 {
+			cfg.ASR.Priority = []string{"tencent-flash", "tencent-rt", "sherpa"}
+		}
+	} else {
+		// 确保 priority 列表中有 sherpa 作为兜底
+		hasSherpa := false
+		for _, p := range cfg.ASR.Priority {
+			if p == "sherpa" {
+				hasSherpa = true
+				break
+			}
+		}
+		if !hasSherpa {
+			cfg.ASR.Priority = append(cfg.ASR.Priority, "sherpa")
+		}
+	}
+	if cfg.ASR.Tencent.Region == "" {
+		cfg.ASR.Tencent.Region = "ap-guangzhou"
 	}
 	if cfg.LLM.MaxHistory == 0 {
 		cfg.LLM.MaxHistory = 10

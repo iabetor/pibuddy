@@ -6,7 +6,7 @@ audio:
 wake:
   model_path: "./models/kws"
   keywords_file: "./models/kws/keywords.txt"
-  threshold: 0.5
+  threshold: 0.4
 
 vad:
   model_path: "./models/vad/silero_vad.onnx"
@@ -14,12 +14,26 @@ vad:
   min_silence_ms: 6000  # 静音 6 秒视为说话结束（平衡响应速度和停顿容忍）
 
 asr:
+  # 引擎优先级列表，按顺序尝试，额度用完自动切换到下一个
+  # 可选值：tencent-rt（腾讯云实时）、tencent-flash（腾讯云一句话）、sherpa（离线）
+  # sherpa 始终作为最终兜底，即使未列出也会自动添加
+  priority:
+    - "tencent-rt"      # 腾讯云实时语音识别（5小时/月免费，流式模式）
+    - "tencent-flash"   # 腾讯云一句话识别（5000次/月免费，批处理模式）
+    - "sherpa"          # sherpa-onnx 离线引擎（无限制）
+  # 离线引擎配置（sherpa-onnx）
   model_path: "./models/asr"
   num_threads: 4  # 增加解码线程数，加速 decode，减少 buffer 积压
   # 端点检测设置（控制说话停顿多久视为结束）
-  rule1_min_trailing_silence: 6.0  # 尾部静音 >= 6 秒触发 endpoint（宽松）
-  rule2_min_trailing_silence: 3.0  # 尾部静音 >= 3 秒触发 endpoint（适中）
+  rule1_min_trailing_silence: 3.2  # 尾部静音 >= 3.2 秒触发 endpoint（无文本时，用于超长静音）
+  rule2_min_trailing_silence: 1.8  # 尾部静音 >= 1.8 秒触发 endpoint（有文本后，正常停顿结束）
   rule3_min_utterance_length: 20.0  # 语音长度 >= 20 秒强制触发 endpoint
+  # 腾讯云配置（可复用 TTS 的密钥，为空则使用 TTS 的密钥）
+  tencent:
+    # secret_id: "${PIBUDDY_TENCENT_SECRET_ID}"   # 可选，默认使用 TTS 的密钥
+    # secret_key: "${PIBUDDY_TENCENT_SECRET_KEY}" # 可选，默认使用 TTS 的密钥
+    region: "ap-guangzhou"
+    app_id: "${PIBUDDY_TENCENT_APP_ID}"  # 实时语音识别需要，在控制台获取
 
 llm:
   provider: "openai"
@@ -28,6 +42,9 @@ llm:
   model: "deepseek-chat"
   system_prompt: |
     你是小派，运行在树莓派上的智能家庭助手。
+
+    【重要：语音输入纠错】
+    用户输入来自语音识别，可能包含同音字错误（如"断桥残学"应为"断桥残雪"）。请根据上下文智能纠正理解，但在回复时使用正确的词汇，不要复述错误。
 
     【核心原则】
     - 说人话，像朋友聊天，不要客服腔
@@ -109,7 +126,7 @@ tts:
     voice: "Tingting"  # macOS 中文语音，为空使用系统默认
 
 log:
-  level: "info"
+  level: "debug"
   # file: "/var/log/pibuddy/pibuddy.log"  # 日志文件路径，注释掉则只输出到控制台
   max_size: 64      # 单个日志文件最大 64MB
   max_backups: 3    # 保留 3 个旧日志文件

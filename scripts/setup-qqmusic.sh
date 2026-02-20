@@ -1,16 +1,16 @@
 #!/bin/bash
 
-# QQAFLMusicApi 部署脚本
+# QQMusicApi 部署脚本
 # 用于安装和配置 QQ 音乐 API 服务
 
 set -e
 
-REPO_URL="https://github.com/QiuChenlyOpenSource/QQAFLMusicApi.git"
-INSTALL_DIR="${1:-$HOME/QQAFLMusicApi}"
+REPO_URL="https://github.com/jsososo/QQMusicApi.git"
+INSTALL_DIR="${1:-$HOME/QQMusicApi}"
 PORT="${2:-3300}"
 NPM_REGISTRY="https://registry.npmmirror.com"
 
-echo "=== QQAFLMusicApi 部署脚本 ==="
+echo "=== QQMusicApi 部署脚本 ==="
 echo "安装目录: $INSTALL_DIR"
 echo "服务端口: $PORT"
 echo "NPM 源: $NPM_REGISTRY"
@@ -40,7 +40,7 @@ if [ -d "$INSTALL_DIR" ]; then
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo "删除现有目录..."
         rm -rf "$INSTALL_DIR"
-        echo "克隆 QQAFLMusicApi 仓库..."
+        echo "克隆 QQMusicApi 仓库..."
         git clone "$REPO_URL" "$INSTALL_DIR"
         cd "$INSTALL_DIR"
     else
@@ -48,7 +48,7 @@ if [ -d "$INSTALL_DIR" ]; then
         cd "$INSTALL_DIR"
     fi
 else
-    echo "克隆 QQAFLMusicApi 仓库..."
+    echo "克隆 QQMusicApi 仓库..."
     git clone "$REPO_URL" "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 fi
@@ -96,10 +96,10 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     read -p "是否创建 systemd 服务? (y/N): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        SERVICE_FILE="/etc/systemd/system/qq-music-api.service"
+        SERVICE_FILE="/etc/systemd/system/qqmusic-api.service"
         sudo tee "$SERVICE_FILE" > /dev/null << EOF
 [Unit]
-Description=QQAFLMusicApi
+Description=QQMusicApi
 After=network.target
 
 [Service]
@@ -116,13 +116,13 @@ WantedBy=multi-user.target
 EOF
 
         sudo systemctl daemon-reload
-        sudo systemctl enable qq-music-api
+        sudo systemctl enable qqmusic-api
         echo ""
         echo "Systemd 服务已创建:"
-        echo "  启动: sudo systemctl start qq-music-api"
-        echo "  停止: sudo systemctl stop qq-music-api"
-        echo "  状态: sudo systemctl status qq-music-api"
-        echo "  日志: sudo journalctl -u qq-music-api -f"
+        echo "  启动: sudo systemctl start qqmusic-api"
+        echo "  停止: sudo systemctl stop qqmusic-api"
+        echo "  状态: sudo systemctl status qqmusic-api"
+        echo "  日志: sudo journalctl -u qqmusic-api -f"
     fi
 fi
 

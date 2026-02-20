@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 )
 
 // Message 表示与 LLM 对话中的一条消息。
@@ -54,4 +55,12 @@ type Provider interface {
 	// ChatStreamWithTools 将对话消息和工具定义发送给 LLM，
 	// 返回一个 channel 逐块接收文本响应，以及可能的工具调用结果。
 	ChatStreamWithTools(ctx context.Context, messages []Message, tools []ToolDefinition) (<-chan string, <-chan *StreamResult, error)
+}
+
+// InsufficientBalanceError 表示余额不足错误。
+var ErrInsufficientBalance = errors.New("余额不足")
+
+// IsInsufficientBalance 检查是否为余额不足错误。
+func IsInsufficientBalance(err error) bool {
+	return errors.Is(err, ErrInsufficientBalance)
 }

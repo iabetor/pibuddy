@@ -14,6 +14,7 @@ import (
 	"github.com/iabetor/pibuddy/internal/asr"
 	"github.com/iabetor/pibuddy/internal/audio"
 	"github.com/iabetor/pibuddy/internal/config"
+	"github.com/iabetor/pibuddy/internal/database"
 	"github.com/iabetor/pibuddy/internal/llm"
 	"github.com/iabetor/pibuddy/internal/logger"
 	"github.com/iabetor/pibuddy/internal/music"
@@ -28,13 +29,14 @@ import (
 // Pipeline 是主编排器，将所有组件串联在一起。
 type Pipeline struct {
 	cfg *config.Config
+	db  *database.DB // 统一数据库
 
 	capture *audio.Capture
 	player  *audio.Player
 
 	wakeDetector *wake.Detector
 	vadDetector  *vad.Detector
-	recognizer   *asr.Recognizer
+	recognizer   asr.Engine // ASR 引擎（支持多引擎兜底）
 
 	llmProvider    llm.Provider
 	contextManager *llm.ContextManager
@@ -99,6 +101,9 @@ type Pipeline struct {
 
 	// 收藏存储
 	favoritesStore *music.FavoritesStore
+
+	// ASR 中间结果去重（只在变化时打印日志）
+	lastASRText string
 }
 
 // New 根据配置创建并初始化完整的 Pipeline。
@@ -109,6 +114,16 @@ func New(cfg *config.Config) (*Pipeline, error) {
 	}
 
 	var err error
+
+	// 初始化统一数据库
+	p.db, err = database.Open("")
+	if err != nil {
+		return nil, fmt.Errorf("初始化数据库失败: %w", err)
+	}
+	if err := p.db.Migrate(); err != nil {
+		p.Close()
+		return nil, fmt.Errorf("数据库迁移失败: %w", err)
+	}
 
 	// 音频采集（16kHz 单声道）
 	p.capture, err = audio.NewCapture(cfg.Audio.SampleRate, cfg.Audio.Channels, cfg.Audio.FrameSize)
@@ -137,14 +152,8 @@ func New(cfg *config.Config) (*Pipeline, error) {
 		return nil, fmt.Errorf("初始化 VAD 失败: %w", err)
 	}
 
-	// 流式语音识别
-	p.recognizer, err = asr.NewRecognizer(
-		cfg.ASR.ModelPath,
-		cfg.ASR.NumThreads,
-		cfg.ASR.Rule1MinTrailingSilence,
-		cfg.ASR.Rule2MinTrailingSilence,
-		cfg.ASR.Rule3MinUtteranceLength,
-	)
+	// 流式语音识别（支持多引擎兜底）
+	p.recognizer, err = initASREngine(cfg)
 	if err != nil {
 		p.Close()
 		return nil, fmt.Errorf("初始化 ASR 失败: %w", err)
@@ -318,7 +327,7 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 
 		// 创建音乐缓存
 		var musicCache *audio.MusicCache
-		musicCache, err = audio.NewMusicCache(cfg.Tools.Music.CacheDir, cfg.Tools.Music.CacheMaxSize)
+		musicCache, err = audio.NewMusicCache(p.db, cfg.Tools.Music.CacheDir, cfg.Tools.Music.CacheMaxSize)
 		if err != nil {
 			logger.Warnf("[pipeline] 创建音乐缓存失败（缓存已禁用）: %v", err)
 		} else if musicCache.Enabled() {
@@ -725,15 +734,15 @@ func (p *Pipeline) performInterrupt(ctx context.Context) {
 	// 再次清空缓冲（播放"我在"期间的回声）
 	p.capture.Drain()
 	// 音乐播放后的回声需要更长时间消散，额外等待
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	p.capture.Drain()
 	// 最后再重置一次 VAD/ASR，确保没有残留状态
 	p.vadDetector.Reset()
 	p.recognizer.Reset()
 
-	// 设置静默期：接下来的 400ms 内丢弃所有音频帧，让回声完全消散
+	// 缩短静默期，避免截断用户说话
 	p.echoSilenceMu.Lock()
-	p.echoSilenceUntil = time.Now().Add(400 * time.Millisecond)
+	p.echoSilenceUntil = time.Now().Add(200 * time.Millisecond)
 	p.echoSilenceMu.Unlock()
 
 	p.state.SetState(StateListening)
@@ -744,7 +753,7 @@ func (p *Pipeline) performInterrupt(ctx context.Context) {
 	}
 
 	// 延迟解除冷却期
-	time.AfterFunc(500*time.Millisecond, p.clearWakeCooldown)
+	time.AfterFunc(300*time.Millisecond, p.clearWakeCooldown)
 }
 
 // playWakeReply 播放唤醒回复语，完成后进入监听状态。
@@ -809,7 +818,11 @@ func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
 
 	text := p.recognizer.GetResult()
 	if text != "" {
-		logger.Debugf("[pipeline] 实时识别: %s", text)
+		// 只在中间结果变化时打印日志，避免相同结果重复刷屏
+		if text != p.lastASRText {
+			logger.Debugf("[pipeline] 实时识别: %s", text)
+			p.lastASRText = text
+		}
 		// ASR 有实时文本输出，说明有人在说话，重置超时计时器
 		p.resetContinuousTimer()
 	}
@@ -817,6 +830,7 @@ func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
 	if p.recognizer.IsEndpoint() {
 		finalText := p.recognizer.GetResult()
 		p.recognizer.Reset()
+		p.lastASRText = "" // 清除中间结果去重状态
 		p.vadDetector.Reset()
 
 		// 如果声纹缓冲区还在收集且已有足够数据（>1秒），也触发识别
@@ -836,6 +850,14 @@ func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
 
 		if strings.TrimSpace(finalText) == "" {
 			// ASR 结果为空，继续监听，等待超时计时器触发
+			return
+		}
+
+		// 清理 ASR 结果中的杂音
+		finalText = sanitizeASRText(finalText)
+		// 纠正常见的同音字错误
+		finalText = correctASRMistakes(finalText)
+		if finalText == "" {
 			return
 		}
 
@@ -888,8 +910,12 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 		textCh, resultCh, err := p.llmProvider.ChatStreamWithTools(queryCtx, messages, toolDefs)
 		if err != nil {
 			logger.Errorf("[pipeline] LLM 调用失败: %v", err)
-			// 使用备用 TTS 播放错误提示
-			if p.fallbackTtsEngine != nil {
+			// 检查是否为余额不足错误
+			if llm.IsInsufficientBalance(err) {
+				p.state.SetState(StateSpeaking)
+				p.speakTextWithFallback(ctx, "大模型余额不足，请充值后再试")
+			} else if p.fallbackTtsEngine != nil {
+				// 使用备用 TTS 播放错误提示
 				p.state.SetState(StateSpeaking)
 				p.speakText(ctx, "网络连接失败，请检查网络设置")
 			}
@@ -1142,12 +1168,22 @@ func (p *Pipeline) resetContinuousTimer() {
 // speakText 合成并播放单段文本。
 // 如果主 TTS 引擎失败且有备用引擎，则使用备用引擎播放错误提示。
 func (p *Pipeline) speakText(ctx context.Context, text string) {
+	p.speakTextWithFallback(ctx, text)
+}
+
+// speakTextWithFallback 使用主 TTS 引擎合成并播放文本，失败时使用备用引擎。
+// 如果主引擎是余额不足错误，使用备用引擎播放提示信息。
+func (p *Pipeline) speakTextWithFallback(ctx context.Context, text string) {
 	samples, sampleRate, err := p.ttsEngine.Synthesize(ctx, text)
 	if err != nil {
 		logger.Errorf("[pipeline] TTS 合成失败: %v", err)
-		// 尝试使用备用引擎播放错误提示
+		// 尝试使用备用引擎
 		if p.fallbackTtsEngine != nil {
+			// 检查是否为余额不足错误
 			fallbackText := "语音合成失败，请检查网络连接"
+			if tts.IsInsufficientBalance(err) {
+				fallbackText = "语音合成余额不足，请充值后再试"
+			}
 			if fbSamples, fbRate, fbErr := p.fallbackTtsEngine.Synthesize(ctx, fallbackText); fbErr == nil && len(fbSamples) > 0 {
 				logger.Info("[pipeline] 使用备用 TTS 引擎播放错误提示")
 				p.playSamples(ctx, fbSamples, fbRate)
@@ -1368,6 +1404,9 @@ func (p *Pipeline) Close() {
 	if p.voiceprintMgr != nil {
 		p.voiceprintMgr.Close()
 	}
+	if p.db != nil {
+		p.db.Close()
+	}
 
 	logger.Info("[pipeline] 已关闭")
 }
@@ -1444,4 +1483,216 @@ func mergeSentences(text string, maxChars int) []string {
 	}
 	flush()
 	return chunks
+}
+
+// sanitizeASRText 清理 ASR 结果中的常见杂音和误识别。
+// 例如 "SPK播放音乐" -> "播放音乐"
+func sanitizeASRText(text string) string {
+	text = strings.TrimSpace(text)
+
+	// 常见的 ASR 杂音前缀模式
+	noisePrefixes := []string{
+		"SPK",    // speaker 标记误识别
+		"SPK0",   // speaker 编号
+		"SPK1",
+		"SPK2",
+		"spk",    // 小写形式
+		"Spk",
+		"SKP",    // 可能的变体
+		"S P K",  // 分开的字母
+	}
+
+	for _, prefix := range noisePrefixes {
+		if strings.HasPrefix(text, prefix) {
+			// 移除前缀及后续可能的空格或标点
+			rest := strings.TrimPrefix(text, prefix)
+			rest = strings.TrimLeft(rest, " 　,，.。:：!！?？")
+			if rest != "" {
+				text = rest
+				break
+			}
+		}
+	}
+
+	// 移除开头的纯字母杂音（如单独的 "A", "B" 等，后跟中文）
+	// 但保留正常的英文单词
+	if len(text) > 1 {
+		// 检查开头是否为 1-3 个大写字母后跟中文
+		for i := 1; i <= 3 && i < len(text); i++ {
+			prefix := text[:i]
+			if len(prefix) > 0 && prefix[0] >= 'A' && prefix[0] <= 'Z' {
+				allUpper := true
+				for _, c := range prefix {
+					if c < 'A' || c > 'Z' {
+						allUpper = false
+						break
+					}
+				}
+				if allUpper && i < len(text) {
+					// 检查下一个字符是否为中文
+					nextRune, _ := utf8.DecodeRuneInString(text[i:])
+					if nextRune >= 0x4E00 && nextRune <= 0x9FFF {
+						// 是中文，检查这个前缀是否像杂音
+						// 单个字母或 SPK 模式更可能是杂音
+						if i <= 2 {
+							rest := strings.TrimLeft(text[i:], " 　,，.。:：!！?？")
+							if rest != "" {
+								text = rest
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return strings.TrimSpace(text)
+}
+
+// correctASRMistakes 纠正 ASR 的常见同音字错误。
+// 主要针对歌曲名、人名、常用词等进行纠正。
+func correctASRMistakes(text string) string {
+	// 纠错映射表：错误 -> 正确
+	// 按歌曲名、人名、常用词分类
+	corrections := map[string]string{
+		// 歌曲名纠错
+		"断桥残学": "断桥残雪", // 许嵩歌曲
+		"断桥残血": "断桥残雪",
+		"清明雨上": "清明雨上", // 保持正确
+		"清明雨伤": "清明雨上",
+		"有何不可": "有何不可", // 保持正确
+		"有何不渴": "有何不可",
+		"灰色头像": "灰色头像", // 保持正确
+		"灰色偷像": "灰色头像",
+		"千百度":   "千百度", // 保持正确
+		"千百肚":   "千百度",
+
+		// 歌手名纠错
+		"许松": "许嵩",
+		"许菘": "许嵩",
+		"周杰伦": "周杰伦", // 保持正确
+		"周杰轮": "周杰伦",
+		"林俊杰": "林俊杰", // 保持正确
+		"林俊节": "林俊杰",
+		"邓紫棋": "邓紫棋", // 保持正确
+		"邓子棋": "邓紫棋",
+		"薛之谦": "薛之谦", // 保持正确
+		"薛志谦": "薛之谦",
+
+		// 常用词纠错
+		"播放": "播放", // 保持正确
+		"拨放": "播放",
+		"暂停": "暂停", // 保持正确
+		"暂廷": "暂停",
+	}
+
+	for wrong, correct := range corrections {
+		if wrong != correct {
+			text = strings.ReplaceAll(text, wrong, correct)
+		}
+	}
+
+	return text
+}
+
+// initASREngine 初始化 ASR 引擎，支持多引擎兜底。
+// 按 asr.priority 列表中的顺序初始化引擎，额度用完自动切换到下一个。
+// sherpa 始终作为最终兜底引擎（端点检测 + 离线识别）。
+func initASREngine(cfg *config.Config) (asr.Engine, error) {
+	var engines []asr.Engine
+	var engineTypes []asr.EngineType
+
+	// 获取腾讯云密钥（优先使用 ASR 配置，其次复用 TTS 配置）
+	secretID := cfg.ASR.Tencent.SecretID
+	secretKey := cfg.ASR.Tencent.SecretKey
+	if secretID == "" {
+		secretID = cfg.TTS.Tencent.SecretID
+	}
+	if secretKey == "" {
+		secretKey = cfg.TTS.Tencent.SecretKey
+	}
+
+	// 按优先级列表初始化引擎
+	logger.Infof("[pipeline] ASR 引擎优先级: %v", cfg.ASR.Priority)
+	for _, name := range cfg.ASR.Priority {
+		switch name {
+		case "tencent-flash":
+			if secretID == "" || secretKey == "" {
+				logger.Warn("[pipeline] 未配置腾讯云密钥，跳过腾讯云一句话识别引擎")
+				continue
+			}
+			engine, err := asr.NewTencentFlashEngine(asr.TencentFlashConfig{
+				SecretID:  secretID,
+				SecretKey: secretKey,
+				Region:    cfg.ASR.Tencent.Region,
+			})
+			if err != nil {
+				logger.Warnf("[pipeline] 腾讯云一句话识别引擎初始化失败: %v", err)
+				continue
+			}
+			engines = append(engines, engine)
+			engineTypes = append(engineTypes, asr.EngineTencentFlash)
+
+		case "tencent-rt":
+			if secretID == "" || secretKey == "" {
+				logger.Warn("[pipeline] 未配置腾讯云密钥，跳过腾讯云实时语音识别引擎")
+				continue
+			}
+			if cfg.ASR.Tencent.AppID == "" {
+				logger.Warn("[pipeline] 未配置腾讯云 AppID，跳过腾讯云实时语音识别引擎")
+				continue
+			}
+			engine, err := asr.NewTencentRTEngine(asr.TencentRTConfig{
+				SecretID:  secretID,
+				SecretKey: secretKey,
+				Region:    cfg.ASR.Tencent.Region,
+				AppID:     cfg.ASR.Tencent.AppID,
+			})
+			if err != nil {
+				logger.Warnf("[pipeline] 腾讯云实时语音识别引擎初始化失败: %v", err)
+				continue
+			}
+			engines = append(engines, engine)
+			engineTypes = append(engineTypes, asr.EngineTencentRT)
+
+		case "sherpa":
+			if cfg.ASR.ModelPath == "" {
+				logger.Warn("[pipeline] 未配置 ASR 模型路径，跳过 Sherpa 引擎")
+				continue
+			}
+			engine, err := asr.NewSherpaEngine(
+				cfg.ASR.ModelPath,
+				cfg.ASR.NumThreads,
+				cfg.ASR.Rule1MinTrailingSilence,
+				cfg.ASR.Rule2MinTrailingSilence,
+				cfg.ASR.Rule3MinUtteranceLength,
+			)
+			if err != nil {
+				logger.Warnf("[pipeline] Sherpa 引擎初始化失败: %v", err)
+				continue
+			}
+			engines = append(engines, engine)
+			engineTypes = append(engineTypes, asr.EngineSherpa)
+
+		default:
+			logger.Warnf("[pipeline] 未知的 ASR 引擎类型: %s，跳过", name)
+		}
+	}
+
+	// 如果没有可用引擎，返回错误
+	if len(engines) == 0 {
+		return nil, fmt.Errorf("没有可用的 ASR 引擎，请检查配置")
+	}
+
+	// 如果只有一个引擎，直接返回
+	if len(engines) == 1 {
+		return engines[0], nil
+	}
+
+	// 多引擎：创建兜底引擎
+	return asr.NewFallbackEngine(asr.FallbackConfig{
+		Engines:     engines,
+		EngineTypes: engineTypes,
+	}), nil
 }

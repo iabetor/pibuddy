@@ -2,26 +2,34 @@ package asr
 
 import (
 	"fmt"
-	"github.com/iabetor/pibuddy/internal/logger"
 	"path/filepath"
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
+	"github.com/iabetor/pibuddy/internal/logger"
 )
 
-// Recognizer 封装 sherpa-onnx 流式在线语音识别器（Zipformer），
+// SherpaEngine 封装 sherpa-onnx 流式在线语音识别器（Zipformer），
 // 维护一个持久化的 OnlineStream 用于增量接收音频并输出识别结果。
-type Recognizer struct {
+// 实现 Engine 接口。
+type SherpaEngine struct {
 	recognizer *sherpa.OnlineRecognizer
 	stream     *sherpa.OnlineStream
 }
 
-// NewRecognizer 创建流式语音识别器。
+// 确保实现 Engine 接口
+var _ Engine = (*SherpaEngine)(nil)
+
+// Recognizer 是 SherpaEngine 的别名，保持向后兼容。
+// Deprecated: 使用 SherpaEngine 代替。
+type Recognizer = SherpaEngine
+
+// NewSherpaEngine 创建 sherpa-onnx 流式语音识别器。
 // modelPath: 包含 Zipformer 模型文件（encoder、decoder、joiner ONNX 文件和 tokens.txt）的目录
 // numThreads: 推理引擎使用的 CPU 线程数
 // rule1MinTrailingSilence: 尾部静音阈值（秒），默认 2.4
 // rule2MinTrailingSilence: 尾部静音阈值（秒），默认 1.2
 // rule3MinUtteranceLength: 最小语音长度（秒），默认 20.0
-func NewRecognizer(modelPath string, numThreads int, rule1MinTrailingSilence, rule2MinTrailingSilence, rule3MinUtteranceLength float64) (*Recognizer, error) {
+func NewSherpaEngine(modelPath string, numThreads int, rule1MinTrailingSilence, rule2MinTrailingSilence, rule3MinUtteranceLength float64) (*SherpaEngine, error) {
 	config := sherpa.OnlineRecognizerConfig{}
 
 	// 特征提取配置
@@ -72,9 +80,9 @@ func NewRecognizer(modelPath string, numThreads int, rule1MinTrailingSilence, ru
 		return nil, fmt.Errorf("创建在线识别流失败")
 	}
 
-	logger.Infof("[asr] 语音识别器已初始化 (model=%s, threads=%d)", modelPath, numThreads)
+	logger.Infof("[asr] Sherpa 引擎已初始化 (model=%s, threads=%d)", modelPath, numThreads)
 
-	return &Recognizer{
+	return &SherpaEngine{
 		recognizer: recognizer,
 		stream:     stream,
 	}, nil
@@ -83,27 +91,27 @@ func NewRecognizer(modelPath string, numThreads int, rule1MinTrailingSilence, ru
 // Feed 将音频样本送入识别流，并立即解码一帧。
 // 样本应为 16kHz float32 格式。
 // 注意：Feed 后立即调用 Decode，减少 circular buffer 积压，避免 Overflow 警告。
-func (r *Recognizer) Feed(samples []float32) {
-	r.stream.AcceptWaveform(16000, samples)
+func (e *SherpaEngine) Feed(samples []float32) {
+	e.stream.AcceptWaveform(16000, samples)
 	// 立即解码一帧，减少 buffer 积压
-	if r.recognizer.IsReady(r.stream) {
-		r.recognizer.Decode(r.stream)
+	if e.recognizer.IsReady(e.stream) {
+		e.recognizer.Decode(e.stream)
 	}
 }
 
 // IsEndpoint 返回识别器是否检测到端点（即说话者已结束一句话）。
-func (r *Recognizer) IsEndpoint() bool {
-	return r.recognizer.IsEndpoint(r.stream)
+func (e *SherpaEngine) IsEndpoint() bool {
+	return e.recognizer.IsEndpoint(e.stream)
 }
 
 // GetResult 解码所有待处理帧并返回当前识别文本。
 // 循环调用 Decode 直到没有待处理帧，防止 circular buffer 因积压而 Overflow。
 // 如果还没有识别到任何内容，返回空字符串。
-func (r *Recognizer) GetResult() string {
-	for r.recognizer.IsReady(r.stream) {
-		r.recognizer.Decode(r.stream)
+func (e *SherpaEngine) GetResult() string {
+	for e.recognizer.IsReady(e.stream) {
+		e.recognizer.Decode(e.stream)
 	}
-	result := r.recognizer.GetResult(r.stream)
+	result := e.recognizer.GetResult(e.stream)
 	return result.Text
 }
 
@@ -111,22 +119,33 @@ func (r *Recognizer) GetResult() string {
 // 在获取完一个端点的结果后应调用此方法。
 // 通过销毁旧 stream 并创建新 stream 来彻底清空内部 circular buffer，
 // 避免长时间运行后 sherpa-onnx circular-buffer Overflow 警告。
-func (r *Recognizer) Reset() {
-	if r.recognizer != nil && r.stream != nil {
-		sherpa.DeleteOnlineStream(r.stream)
-		r.stream = sherpa.NewOnlineStream(r.recognizer)
+func (e *SherpaEngine) Reset() {
+	if e.recognizer != nil && e.stream != nil {
+		sherpa.DeleteOnlineStream(e.stream)
+		e.stream = sherpa.NewOnlineStream(e.recognizer)
 	}
 }
 
-// Close 释放底层 sherpa-onnx 资源。调用后不可再使用此 Recognizer。
-func (r *Recognizer) Close() {
-	if r.stream != nil {
-		sherpa.DeleteOnlineStream(r.stream)
-		r.stream = nil
+// Close 释放底层 sherpa-onnx 资源。调用后不可再使用此引擎。
+func (e *SherpaEngine) Close() {
+	if e.stream != nil {
+		sherpa.DeleteOnlineStream(e.stream)
+		e.stream = nil
 	}
-	if r.recognizer != nil {
-		sherpa.DeleteOnlineRecognizer(r.recognizer)
-		r.recognizer = nil
+	if e.recognizer != nil {
+		sherpa.DeleteOnlineRecognizer(e.recognizer)
+		e.recognizer = nil
 	}
-	logger.Info("[asr] 语音识别器已关闭")
+	logger.Info("[asr] Sherpa 引擎已关闭")
+}
+
+// Name 返回引擎名称。
+func (e *SherpaEngine) Name() string {
+	return string(EngineSherpa)
+}
+
+// NewRecognizer 是 NewSherpaEngine 的别名，保持向后兼容。
+// Deprecated: 使用 NewSherpaEngine 代替。
+func NewRecognizer(modelPath string, numThreads int, rule1MinTrailingSilence, rule2MinTrailingSilence, rule3MinUtteranceLength float64) (*SherpaEngine, error) {
+	return NewSherpaEngine(modelPath, numThreads, rule1MinTrailingSilence, rule2MinTrailingSilence, rule3MinUtteranceLength)
 }

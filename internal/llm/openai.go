@@ -112,6 +112,10 @@ func (p *OpenAIProvider) ChatStreamWithTools(ctx context.Context, messages []Mes
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		// 检查是否为余额不足错误 (DeepSeek 返回 402)
+		if resp.StatusCode == 402 {
+			return nil, nil, fmt.Errorf("[llm] API 返回状态码 402: %s: %w", string(body), ErrInsufficientBalance)
+		}
 		return nil, nil, fmt.Errorf("[llm] API 返回状态码 %d: %s", resp.StatusCode, string(body))
 	}
 
