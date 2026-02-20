@@ -780,6 +780,226 @@ preBufferFileLoop:
 	}
 }
 
+// PlayFromPosition 从本地缓存文件的指定位置开始播放。
+// positionSec: 从第几秒开始播放
+// 返回实际开始播放的位置（秒），用于日志显示。
+func (sp *StreamPlayer) PlayFromPosition(ctx context.Context, filePath string, positionSec float64) (float64, error) {
+	sp.mu.Lock()
+	if sp.closed {
+		sp.mu.Unlock()
+		return 0, fmt.Errorf("播放器已关闭")
+	}
+	fileCtx, cancel := context.WithCancel(ctx)
+	sp.cancel = cancel
+	sp.mu.Unlock()
+
+	defer func() {
+		sp.mu.Lock()
+		sp.cancel = nil
+		sp.mu.Unlock()
+	}()
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return 0, fmt.Errorf("打开缓存文件失败: %w", err)
+	}
+	defer f.Close()
+
+	decoder, err := mp3.NewDecoder(f)
+	if err != nil {
+		return 0, fmt.Errorf("创建 MP3 解码器失败: %w", err)
+	}
+
+	sampleRate := decoder.SampleRate()
+	logger.Debugf("[audio] 从位置播放: 采样率 %d Hz, 文件 %s, 起始 %.1f 秒", sampleRate, filePath, positionSec)
+
+	// 计算需要跳过的样本数
+	// MP3 解码后是 int16 立体声，每个样本 4 字节
+	// sampleRate 是每秒的单声道样本数
+	samplesToSkip := int64(positionSec * float64(sampleRate))
+	bytesToSkip := samplesToSkip * 4 // int16 立体声 = 4 字节/样本
+
+	logger.Debugf("[audio] 跳过 %d 字节 (%.1f 秒)", bytesToSkip, positionSec)
+
+	// 跳过字节
+	buf := make([]byte, 32768)
+	skipped := int64(0)
+	for skipped < bytesToSkip {
+		toRead := bytesToSkip - skipped
+		if toRead > int64(len(buf)) {
+			toRead = int64(len(buf))
+		}
+		n, err := decoder.Read(buf[:toRead])
+		skipped += int64(n)
+		if err != nil {
+			if err == io.EOF {
+				// 文件比预期短，从头播放
+				logger.Warnf("[audio] 文件长度不足，从头播放")
+				f.Seek(0, 0)
+				decoder, _ = mp3.NewDecoder(f)
+				sampleRate = decoder.SampleRate()
+				positionSec = 0
+				break
+			}
+			return 0, fmt.Errorf("跳过字节失败: %w", err)
+		}
+	}
+
+	// 计算实际跳过的秒数（精确）
+	actualPositionSec := float64(skipped/4) / float64(sampleRate)
+	logger.Debugf("[audio] 实际跳过 %.1f 秒", actualPositionSec)
+
+	chunkSize := sampleRate * 2
+	const bufferChunks = 5
+	sampleCh := make(chan []float32, bufferChunks)
+	errCh := make(chan error, 1)
+
+	// 解码
+	go func() {
+		defer close(sampleCh)
+		buf := make([]byte, 16384)
+		var samples []float32
+
+		for {
+			select {
+			case <-fileCtx.Done():
+				return
+			default:
+			}
+
+			n, err := decoder.Read(buf)
+			if err != nil {
+				if err == io.EOF {
+					if len(samples) > 0 {
+						select {
+						case sampleCh <- samples:
+						case <-fileCtx.Done():
+						}
+					}
+					return
+				}
+				select {
+				case errCh <- fmt.Errorf("读取音频数据失败: %w", err):
+				default:
+				}
+				return
+			}
+			if n == 0 {
+				continue
+			}
+
+			chunkSamples := int16StereoToMonoFloat32(buf[:n])
+			samples = append(samples, chunkSamples...)
+
+			for len(samples) >= chunkSize {
+				chunk := make([]float32, chunkSize)
+				copy(chunk, samples[:chunkSize])
+				samples = samples[chunkSize:]
+				select {
+				case sampleCh <- chunk:
+				case <-fileCtx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	// 预缓冲
+	preBuffer := make([][]float32, 0, 1)
+preBufferFileLoop:
+	for len(preBuffer) < 1 {
+		select {
+		case <-fileCtx.Done():
+			return actualPositionSec, fileCtx.Err()
+		case err := <-errCh:
+			return actualPositionSec, err
+		case chunk, ok := <-sampleCh:
+			if !ok {
+				break preBufferFileLoop
+			}
+			preBuffer = append(preBuffer, chunk)
+		}
+	}
+	if len(preBuffer) == 0 {
+		return actualPositionSec, nil
+	}
+
+	var totalLen int
+	for _, c := range preBuffer {
+		totalLen += len(c)
+	}
+	pcmData := make([]byte, 0, totalLen*2)
+	for _, c := range preBuffer {
+		pcmData = append(pcmData, Float32ToBytes(c)...)
+	}
+	pos := 0
+	done := make(chan struct{})
+
+	deviceConfig := malgo.DefaultDeviceConfig(malgo.Playback)
+	deviceConfig.Playback.Format = malgo.FormatS16
+	deviceConfig.Playback.Channels = sp.channels
+	deviceConfig.SampleRate = uint32(sampleRate)
+	deviceConfig.PeriodSizeInFrames = 4096
+	deviceConfig.Periods = 4
+
+	callbacks := malgo.DeviceCallbacks{
+		Data: func(outputSamples, inputSamples []byte, frameCount uint32) {
+			totalBytes := int(frameCount) * int(sp.channels) * 2
+			writePos := 0
+
+			for writePos < totalBytes {
+				if pos >= len(pcmData) {
+					select {
+					case chunk, ok := <-sampleCh:
+						if !ok {
+							for i := writePos; i < totalBytes; i++ {
+								outputSamples[i] = 0
+							}
+							select {
+							case done <- struct{}{}:
+							default:
+							}
+							return
+						}
+						pcmData = Float32ToBytes(chunk)
+						pos = 0
+					}
+				}
+
+				end := pos + (totalBytes - writePos)
+				if end > len(pcmData) {
+					end = len(pcmData)
+				}
+				copied := copy(outputSamples[writePos:], pcmData[pos:end])
+				pos = end
+				writePos += copied
+			}
+		},
+	}
+
+	device, err := malgo.InitDevice(sp.ctx.Context, deviceConfig, callbacks)
+	if err != nil {
+		return actualPositionSec, fmt.Errorf("初始化播放设备失败: %w", err)
+	}
+	defer device.Uninit()
+
+	if err := device.Start(); err != nil {
+		return actualPositionSec, fmt.Errorf("启动播放设备失败: %w", err)
+	}
+	defer device.Stop()
+
+	select {
+	case <-fileCtx.Done():
+		logger.Debug("[audio] 从位置播放被取消")
+		return actualPositionSec, fileCtx.Err()
+	case err := <-errCh:
+		return actualPositionSec, err
+	case <-done:
+		logger.Debug("[audio] 从位置播放完成")
+		return actualPositionSec, nil
+	}
+}
+
 // cacheFileWriter 用于将下载的音频数据异步写入缓存文件。
 type cacheFileWriter struct {
 	file *os.File

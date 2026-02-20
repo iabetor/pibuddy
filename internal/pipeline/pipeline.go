@@ -92,6 +92,11 @@ type Pipeline struct {
 	// 暂停的音乐存储（用于恢复播放）
 	pausedStore *music.PausedMusicStore
 
+	// 音乐播放时间跟踪
+	musicPlayStart    time.Time // 当前歌曲播放开始时间
+	musicPlayStartMu  sync.Mutex
+	currentCacheKey   string // 当前歌曲的缓存 key
+
 	// 收藏存储
 	favoritesStore *music.FavoritesStore
 }
@@ -215,19 +220,19 @@ func New(cfg *config.Config) (*Pipeline, error) {
 		}
 	}
 
-	// 初始化工具（需要 voiceprintMgr 已就绪）
-	if err := p.initTools(cfg); err != nil {
-		p.Close()
-		return nil, fmt.Errorf("初始化工具失败: %w", err)
-	}
-
-	// 初始化流式播放器（音乐）
+	// 初始化流式播放器（音乐）— 必须在 initTools 之前，工具注册需要 streamPlayer
 	streamPlayer, err := audio.NewStreamPlayer(1) // 单声道
 	if err != nil {
 		p.Close()
 		return nil, fmt.Errorf("初始化流式播放器失败: %w", err)
 	}
 	p.streamPlayer = streamPlayer
+
+	// 初始化工具（需要 voiceprintMgr 已就绪）
+	if err := p.initTools(cfg); err != nil {
+		p.Close()
+		return nil, fmt.Errorf("初始化工具失败: %w", err)
+	}
 
 	logger.Info("[pipeline] 所有组件初始化完成")
 	return p, nil
@@ -357,7 +362,7 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 
 		// 恢复播放工具
 		p.pausedStore = music.NewPausedMusicStore()
-		p.toolRegistry.Register(tools.NewResumeMusicTool(p.playlist, p.pausedStore))
+		p.toolRegistry.Register(tools.NewResumeMusicTool(p.playlist, p.pausedStore, musicCache))
 		p.toolRegistry.Register(tools.NewStopMusicTool(p.playlist, p.pausedStore))
 		logger.Info("[pipeline] 音乐收藏和恢复播放工具已启用")
 	}
@@ -998,7 +1003,7 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 					if musicResult.Success && (musicResult.URL != "" || musicResult.CacheKey != "") {
 						// 播放音乐
 						logger.Infof("[pipeline] 开始播放音乐: %s - %s", musicResult.Artist, musicResult.SongName)
-						p.playMusic(ctx, musicResult.URL, musicResult.CacheKey)
+						p.playMusicFromPosition(ctx, musicResult.URL, musicResult.CacheKey, musicResult.PositionSec)
 						// 音乐播放结束后继续
 						return
 					}
@@ -1206,22 +1211,79 @@ func (p *Pipeline) savePausedMusic() {
 		return
 	}
 
+	// 计算播放位置
+	p.musicPlayStartMu.Lock()
+	positionSec := time.Since(p.musicPlayStart).Seconds()
+	cacheKey := p.currentCacheKey
+	p.musicPlayStartMu.Unlock()
+
 	p.pausedStore.Save(
 		p.playlist.GetItems(),
 		p.playlist.CurrentIndex(),
 		p.playlist.Mode(),
 		current.Song.Name,
+		positionSec,
+		cacheKey,
 	)
 
-	logger.Infof("[pipeline] 已保存播放状态: %s (索引 %d/%d)",
-		current.Song.Name, p.playlist.CurrentIndex()+1, p.playlist.Len())
+	logger.Infof("[pipeline] 已保存播放状态: %s (索引 %d/%d, 位置 %.1fs)",
+		current.Song.Name, p.playlist.CurrentIndex()+1, p.playlist.Len(), positionSec)
 }
 
 // playMusic 播放音乐，播放结束后自动播放列表中的下一首。
 func (p *Pipeline) playMusic(ctx context.Context, url string, cacheKey string) {
+	p.playMusicFromPosition(ctx, url, cacheKey, 0)
+}
+
+// playMusicFromPosition 从指定位置播放音乐，播放结束后自动播放列表中的下一首。
+// positionSec > 0 时，如果缓存存在则从指定位置开始播放。
+func (p *Pipeline) playMusicFromPosition(ctx context.Context, url string, cacheKey string, positionSec float64) {
 	// 确保状态为 Speaking
 	if p.state.Current() != StateSpeaking {
 		p.state.SetState(StateSpeaking)
+	}
+
+	// 记录播放开始时间和缓存 key（用于恢复播放）
+	// 如果从位置恢复，需要调整开始时间以反映实际播放位置
+	p.musicPlayStartMu.Lock()
+	if positionSec > 0 {
+		p.musicPlayStart = time.Now().Add(-time.Duration(positionSec * float64(time.Second)))
+	} else {
+		p.musicPlayStart = time.Now()
+	}
+	p.currentCacheKey = cacheKey
+	p.musicPlayStartMu.Unlock()
+
+	// 检查是否可以从缓存文件的位置播放
+	if positionSec > 0 && cacheKey != "" && p.musicCache != nil {
+		if cachedPath, ok := p.musicCache.Lookup(cacheKey); ok {
+			logger.Infof("[pipeline] 从 %.0f 秒处恢复播放 (缓存: %s)", positionSec, cacheKey)
+			actualPos, err := p.streamPlayer.PlayFromPosition(ctx, cachedPath, positionSec)
+			if err != nil {
+				logger.Warnf("[pipeline] 从位置播放失败，从头播放: %v", err)
+				// 失败时从头播放
+				positionSec = 0
+				p.musicPlayStartMu.Lock()
+				p.musicPlayStart = time.Now()
+				p.musicPlayStartMu.Unlock()
+				opts := &audio.PlayOptions{
+					CacheKey: cacheKey,
+					Cache:    p.musicCache,
+				}
+				if err := p.streamPlayer.Play(ctx, url, opts); err != nil {
+					if err != context.Canceled {
+						logger.Errorf("[pipeline] 音乐播放失败: %v", err)
+					}
+					p.enterContinuousMode()
+					return
+				}
+			} else {
+				logger.Infof("[pipeline] 实际从 %.0f 秒开始播放", actualPos)
+			}
+			// 播放完成，处理下一首
+			p.handleMusicCompletion(ctx, cacheKey)
+			return
+		}
 	}
 
 	// 构建播放选项
@@ -1242,8 +1304,14 @@ func (p *Pipeline) playMusic(ctx context.Context, url string, cacheKey string) {
 		return
 	}
 
+	// 播放完成，处理下一首
+	p.handleMusicCompletion(ctx, cacheKey)
+}
+
+// handleMusicCompletion 处理音乐播放完成后的逻辑（更新缓存索引、自动下一首）。
+func (p *Pipeline) handleMusicCompletion(ctx context.Context, cacheKey string) {
 	// 播放完成，更新缓存索引（如果走了网络下载路径）
-	if opts != nil && p.musicCache != nil && p.musicCache.Enabled() && cacheKey != "" {
+	if cacheKey != "" && p.musicCache != nil && p.musicCache.Enabled() {
 		// 检查缓存文件是否存在（下载完成后会 commit）
 		filePath := p.musicCache.FilePath(cacheKey)
 		if _, err := os.Stat(filePath); err == nil {

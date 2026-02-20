@@ -3,7 +3,10 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"time"
 
+	"github.com/iabetor/pibuddy/internal/audio"
 	"github.com/iabetor/pibuddy/internal/music"
 )
 
@@ -11,13 +14,15 @@ import (
 type ResumeMusicTool struct {
 	playlist    *music.Playlist
 	pausedStore *music.PausedMusicStore
+	musicCache  *audio.MusicCache
 }
 
 // NewResumeMusicTool 创建恢复播放工具。
-func NewResumeMusicTool(playlist *music.Playlist, pausedStore *music.PausedMusicStore) *ResumeMusicTool {
+func NewResumeMusicTool(playlist *music.Playlist, pausedStore *music.PausedMusicStore, musicCache *audio.MusicCache) *ResumeMusicTool {
 	return &ResumeMusicTool{
 		playlist:    playlist,
 		pausedStore: pausedStore,
+		musicCache:  musicCache,
 	}
 }
 
@@ -28,7 +33,7 @@ func (t *ResumeMusicTool) Name() string {
 
 // Description 返回工具描述。
 func (t *ResumeMusicTool) Description() string {
-	return `恢复之前被打断的音乐播放。当音乐被唤醒词打断后，可以说"继续播放"恢复。`
+	return `恢复之前被打断的音乐播放。当音乐被唤醒词打断后，可以说"继续播放"恢复。如果打断超过一分钟，将从开头播放。`
 }
 
 // Parameters 返回工具参数定义。
@@ -50,6 +55,10 @@ func (t *ResumeMusicTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return marshalResult(result)
 	}
 
+	// 检查时间间隔：超过 1 分钟就不恢复位置
+	timeSincePaused := time.Since(paused.PausedAt)
+	fromPosition := timeSincePaused <= time.Minute
+
 	// 恢复播放列表和当前索引
 	t.playlist.ReplaceWithIndex(paused.Items, paused.Index)
 	t.playlist.SetMode(paused.Mode)
@@ -64,6 +73,9 @@ func (t *ResumeMusicTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return marshalResult(result)
 	}
 
+	// 清除暂停状态
+	t.pausedStore.Clear()
+
 	// 返回当前歌曲的信息
 	result := MusicResult{
 		Success:      true,
@@ -73,6 +85,20 @@ func (t *ResumeMusicTool) Execute(ctx context.Context, args json.RawMessage) (st
 		CacheKey:     item.CacheKey,
 		PlaylistSize: len(paused.Items),
 	}
+
+	// 检查是否可以从位置恢复
+	if fromPosition && paused.PositionSec > 0 && paused.CacheKey != "" && t.musicCache != nil {
+		if _, ok := t.musicCache.Lookup(paused.CacheKey); ok {
+			// 缓存存在，返回位置信息让 Pipeline 处理
+			result.PositionSec = paused.PositionSec
+			result.Message = fmt.Sprintf("从 %.0f 秒处恢复播放", paused.PositionSec)
+		} else {
+			result.Message = "缓存不存在，从头播放"
+		}
+	} else if timeSincePaused > time.Minute {
+		result.Message = fmt.Sprintf("暂停已超过 %.0f 分钟，从头播放", timeSincePaused.Minutes())
+	}
+
 	return marshalResult(result)
 }
 

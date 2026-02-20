@@ -167,14 +167,16 @@ func (t *PlayMusicTool) Parameters() json.RawMessage {
 
 // MusicResult 音乐播放结果，供 Pipeline 解析。
 type MusicResult struct {
-	Success      bool   `json:"success"`
-	SongName     string `json:"song_name,omitempty"`
-	Artist       string `json:"artist,omitempty"`
-	URL          string `json:"url,omitempty"`
-	CacheKey     string `json:"cache_key,omitempty"`    // 缓存标识，如 "qq_12345678"
-	Error        string `json:"error,omitempty"`
-	NeedsVIP     bool   `json:"needs_vip,omitempty"`
-	PlaylistSize int    `json:"playlist_size,omitempty"` // 播放列表中的总歌曲数
+	Success      bool    `json:"success"`
+	SongName     string  `json:"song_name,omitempty"`
+	Artist       string  `json:"artist,omitempty"`
+	URL          string  `json:"url,omitempty"`
+	CacheKey     string  `json:"cache_key,omitempty"`    // 缓存标识，如 "qq_12345678"
+	Error        string  `json:"error,omitempty"`
+	NeedsVIP     bool    `json:"needs_vip,omitempty"`
+	PlaylistSize int     `json:"playlist_size,omitempty"` // 播放列表中的总歌曲数
+	Message      string  `json:"message,omitempty"`       // 附加消息（如恢复播放信息）
+	PositionSec  float64 `json:"position_sec,omitempty"`  // 从指定位置开始播放（秒）
 }
 
 func (t *PlayMusicTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {

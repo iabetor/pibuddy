@@ -119,7 +119,7 @@ dialog:
   continuous_timeout: 10  # 连续对话超时（秒），回复后等待用户继续说话的时间
   wake_reply: "我在，请问有什么可以帮助您的？"  # 唤醒回复语，为空则不播放
   interrupt_reply: "我在"  # 打断播放时的回复语，区别于唤醒回复
-  listen_delay: 500  # 播放回复语后延迟进入监听的时间（毫秒），给用户反应时间
+  listen_delay: 300  # 播放回复语后延迟进入监听的时间（毫秒），给用户反应时间
 
 voiceprint:
   enabled: true

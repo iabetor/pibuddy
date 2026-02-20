@@ -21,9 +21,93 @@ PiBuddy 的音乐播放会在用户唤醒打断时完全停止，导致播放状
 - 处理歌曲URL过期的情况
 
 **Non-Goals**：
-- 不保存精确的播放位置（秒级）
+- ~~不保存精确的播放位置（秒级）~~ → 已支持
 - 不支持多级暂停历史
 - 不区分不同用户的暂停状态
+
+## 追加需求：从指定位置恢复播放
+
+**背景**：用户反馈打断后恢复播放总是从头开始，希望能从中断位置继续播放。
+
+**新增目标**：
+- 保存播放位置（秒级）
+- 如果暂停时间超过1分钟，从头播放（避免"隔天继续"的困惑）
+- 如果缓存存在，从指定位置开始播放
+
+**技术方案**：
+
+### 1. 记录播放位置
+
+在 Pipeline 中跟踪当前歌曲播放的开始时间：
+
+```go
+type Pipeline struct {
+    // ...
+    musicPlayStart   time.Time // 当前歌曲播放开始时间
+    musicPlayStartMu sync.Mutex
+    currentCacheKey  string    // 当前歌曲的缓存 key
+}
+
+// 在 startMusicPlayback 中记录
+p.musicPlayStartMu.Lock()
+p.musicPlayStart = time.Now()
+p.currentCacheKey = cacheKey
+p.musicPlayStartMu.Unlock()
+```
+
+### 2. 打断时计算播放位置
+
+```go
+func (p *Pipeline) savePausedMusic() {
+    // 计算已播放秒数
+    positionSec := time.Since(p.musicPlayStart).Seconds()
+
+    p.pausedStore.Save(items, index, mode, songName, positionSec, cacheKey)
+}
+```
+
+### 3. StreamPlayer 支持从指定位置播放
+
+新增 `PlayFromPosition` 方法，支持从指定秒数开始播放（仅对本地缓存文件有效）：
+
+```go
+// PlayFromPosition 从本地缓存文件的指定位置开始播放
+// positionSec: 从第几秒开始播放
+func (sp *StreamPlayer) PlayFromPosition(ctx context.Context, filePath string, positionSec float64) error {
+    // 1. 打开文件
+    // 2. 创建 MP3 解码器
+    // 3. 跳过 positionSec 秒的样本
+    // 4. 从跳过后的位置开始播放
+}
+```
+
+### 4. 恢复播放逻辑
+
+```go
+func (t *ResumeMusicTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+    paused := t.pausedStore.Get()
+
+    // 检查时间间隔
+    timeSincePaused := time.Since(paused.PausedAt)
+    fromPosition := timeSincePaused <= time.Minute
+
+    if fromPosition && paused.PositionSec > 0 && paused.CacheKey != "" {
+        // 检查缓存是否存在
+        if cachedPath, ok := t.cache.Lookup(paused.CacheKey); ok {
+            // 从指定位置播放
+            result.Message = fmt.Sprintf("从 %.0f 秒处恢复播放", paused.PositionSec)
+            return sp.PlayFromPosition(ctx, cachedPath, paused.PositionSec)
+        }
+    }
+
+    if timeSincePaused > time.Minute {
+        result.Message = fmt.Sprintf("暂停已超过 %.0f 分钟，从头播放", timeSincePaused.Minutes())
+    }
+
+    // 从头播放
+    return sp.Play(ctx, url, opts)
+}
+```
 
 ## Decisions
 
