@@ -39,7 +39,7 @@ type Pipeline struct {
 	llmProvider    llm.Provider
 	contextManager *llm.ContextManager
 
-	ttsEngine        tts.Engine
+	ttsEngine         tts.Engine
 	fallbackTtsEngine tts.Engine // 回退 TTS 引擎（网络失败时使用）
 
 	toolRegistry *tools.Registry
@@ -72,8 +72,12 @@ type Pipeline struct {
 	continuousMu    sync.Mutex
 
 	// 唤醒词防抖
-	wakeCooldown   bool      // 是否处于冷却期
+	wakeCooldown   bool // 是否处于冷却期
 	wakeCooldownMu sync.Mutex
+
+	// 回声静默期：打断后的静默期内丢弃所有音频帧
+	echoSilenceUntil time.Time
+	echoSilenceMu    sync.Mutex
 
 	// 打断标志（跨 goroutine 通信，通知 processQuery 退出）
 	interrupted atomic.Bool
@@ -82,8 +86,14 @@ type Pipeline struct {
 	voiceprintMgr     *voiceprint.Manager
 	voiceprintBuf     []float32
 	voiceprintBufMu   sync.Mutex
-	voiceprintBufSize int // 目标缓冲大小 = BufferSecs * SampleRate
+	voiceprintBufSize int            // 目标缓冲大小 = BufferSecs * SampleRate
 	voiceprintWg      sync.WaitGroup // 等待声纹识别完成
+
+	// 暂停的音乐存储（用于恢复播放）
+	pausedStore *music.PausedMusicStore
+
+	// 收藏存储
+	favoritesStore *music.FavoritesStore
 }
 
 // New 根据配置创建并初始化完整的 Pipeline。
@@ -183,7 +193,29 @@ func New(cfg *config.Config) (*Pipeline, error) {
 		}
 	}
 
-	// 初始化工具
+	// 初始化声纹识别（可选，失败不阻止启动）— 必须在 initTools 之前，工具注册需要 voiceprintMgr
+	logger.Debugf("[pipeline] 声纹配置: enabled=%v, model=%s", cfg.Voiceprint.Enabled, cfg.Voiceprint.ModelPath)
+	if cfg.Voiceprint.Enabled && cfg.Voiceprint.ModelPath != "" {
+		vpMgr, vpErr := voiceprint.NewManager(cfg.Voiceprint, cfg.Tools.DataDir)
+		if vpErr != nil {
+			logger.Warnf("[pipeline] 声纹识别初始化失败（已禁用）: %v", vpErr)
+		} else {
+			p.voiceprintMgr = vpMgr
+			p.voiceprintBufSize = int(cfg.Voiceprint.BufferSecs * float32(cfg.Audio.SampleRate))
+			logger.Infof("[pipeline] 声纹识别已启用，已注册 %d 个用户", vpMgr.NumSpeakers())
+
+			// 设置主人（如果配置了主人姓名）
+			if cfg.Voiceprint.OwnerName != "" {
+				if err := vpMgr.SetOwner(cfg.Voiceprint.OwnerName); err != nil {
+					logger.Warnf("[pipeline] 设置主人失败: %v", err)
+				} else {
+					logger.Infof("[pipeline] 已设置主人: %s", cfg.Voiceprint.OwnerName)
+				}
+			}
+		}
+	}
+
+	// 初始化工具（需要 voiceprintMgr 已就绪）
 	if err := p.initTools(cfg); err != nil {
 		p.Close()
 		return nil, fmt.Errorf("初始化工具失败: %w", err)
@@ -196,26 +228,6 @@ func New(cfg *config.Config) (*Pipeline, error) {
 		return nil, fmt.Errorf("初始化流式播放器失败: %w", err)
 	}
 	p.streamPlayer = streamPlayer
-
-	// 初始化声纹识别（可选，失败不阻止启动）
-	if cfg.Voiceprint.Enabled && cfg.Voiceprint.ModelPath != "" {
-		vpMgr, vpErr := voiceprint.NewManager(cfg.Voiceprint, cfg.Tools.DataDir)
-		if vpErr != nil {
-			logger.Warnf("[pipeline] 声纹识别初始化失败（已禁用）: %v", vpErr)
-		} else {
-			p.voiceprintMgr = vpMgr
-			p.voiceprintBufSize = int(cfg.Voiceprint.BufferSecs * float32(cfg.Audio.SampleRate))
-
-			// 设置主人（如果配置了主人姓名）
-			if cfg.Voiceprint.OwnerName != "" {
-				if err := vpMgr.SetOwner(cfg.Voiceprint.OwnerName); err != nil {
-					logger.Warnf("[pipeline] 设置主人失败: %v", err)
-				} else {
-					logger.Infof("[pipeline] 已设置主人: %s", cfg.Voiceprint.OwnerName)
-				}
-			}
-		}
-	}
 
 	logger.Info("[pipeline] 所有组件初始化完成")
 	return p, nil
@@ -328,6 +340,26 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 			p.toolRegistry.Register(tools.NewListMusicCacheTool(musicCache))
 			p.toolRegistry.Register(tools.NewDeleteMusicCacheTool(musicCache))
 		}
+
+		// 初始化收藏存储
+		p.favoritesStore = music.NewFavoritesStore(cfg.Tools.DataDir)
+
+		// 收藏和恢复播放工具
+		favCfg := tools.FavoritesConfig{
+			Store:          p.favoritesStore,
+			Playlist:       p.playlist,
+			ContextManager: p.contextManager,
+		}
+		p.toolRegistry.Register(tools.NewAddFavoriteTool(favCfg))
+		p.toolRegistry.Register(tools.NewRemoveFavoriteTool(favCfg))
+		p.toolRegistry.Register(tools.NewListFavoritesTool(favCfg))
+		p.toolRegistry.Register(tools.NewPlayFavoritesTool(favCfg, musicProvider))
+
+		// 恢复播放工具
+		p.pausedStore = music.NewPausedMusicStore()
+		p.toolRegistry.Register(tools.NewResumeMusicTool(p.playlist, p.pausedStore))
+		p.toolRegistry.Register(tools.NewStopMusicTool(p.playlist, p.pausedStore))
+		logger.Info("[pipeline] 音乐收藏和恢复播放工具已启用")
 	}
 
 	// RSS 订阅工具
@@ -358,6 +390,10 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 		p.toolRegistry.Register(tools.NewSetPreferencesTool(vpCfg))
 	}
 
+	// whoami 和 list_voiceprint_users 始终注册（即使声纹未启用，返回友好提示）
+	p.toolRegistry.Register(tools.NewWhoAmITool(p.voiceprintMgr, p.contextManager))
+	p.toolRegistry.Register(tools.NewListVoiceprintUsersTool(p.voiceprintMgr))
+
 	// 倒计时工具
 	p.timerStore, err = tools.NewTimerStore(cfg.Tools.DataDir, func(entry tools.TimerEntry) {
 		// 倒计时到期回调
@@ -376,6 +412,9 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 	p.toolRegistry.Register(tools.NewSetTimerTool(p.timerStore))
 	p.toolRegistry.Register(tools.NewListTimersTool(p.timerStore))
 	p.toolRegistry.Register(tools.NewCancelTimerTool(p.timerStore))
+
+	// 休息工具
+	p.toolRegistry.Register(tools.NewGoToSleepTool())
 
 	// 音量控制工具
 	p.volumeCtrl, err = tools.NewVolumeController()
@@ -661,6 +700,9 @@ func (p *Pipeline) performInterrupt(ctx context.Context) {
 	// 停止所有播放
 	p.interruptSpeak()
 
+	// 立即清空麦克风缓冲（防止音乐残留）
+	p.capture.Drain()
+
 	// 重置 ASR/VAD
 	p.vadDetector.Reset()
 	p.recognizer.Reset()
@@ -671,11 +713,23 @@ func (p *Pipeline) performInterrupt(ctx context.Context) {
 		p.speakText(ctx, p.cfg.Dialog.InterruptReply)
 	}
 
-	// 延迟后进入监听状态（给用户反应时间）
+	// 延迟后进入监听状态（给用户反应时间 + 让回声消散）
 	if p.cfg.Dialog.ListenDelay > 0 {
 		time.Sleep(time.Duration(p.cfg.Dialog.ListenDelay) * time.Millisecond)
 	}
-	p.capture.Drain() // 清空回声残留
+	// 再次清空缓冲（播放"我在"期间的回声）
+	p.capture.Drain()
+	// 音乐播放后的回声需要更长时间消散，额外等待
+	time.Sleep(500 * time.Millisecond)
+	p.capture.Drain()
+	// 最后再重置一次 VAD/ASR，确保没有残留状态
+	p.vadDetector.Reset()
+	p.recognizer.Reset()
+
+	// 设置静默期：接下来的 800ms 内丢弃所有音频帧，让回声完全消散
+	p.echoSilenceMu.Lock()
+	p.echoSilenceUntil = time.Now().Add(800 * time.Millisecond)
+	p.echoSilenceMu.Unlock()
 
 	p.state.SetState(StateListening)
 
@@ -716,6 +770,15 @@ func (p *Pipeline) playWakeReply(ctx context.Context) {
 
 // handleListening 同时将音频送入 VAD 和 ASR。
 func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
+	// 检查是否在静默期内（打断后的回声消散期）
+	p.echoSilenceMu.Lock()
+	silenceUntil := p.echoSilenceUntil
+	p.echoSilenceMu.Unlock()
+	if time.Now().Before(silenceUntil) {
+		// 静默期内丢弃帧，不送入 VAD/ASR
+		return
+	}
+
 	// 声纹缓冲：收集音频帧用于说话人识别
 	p.voiceprintBufMu.Lock()
 	if p.voiceprintBuf != nil && len(p.voiceprintBuf) < p.voiceprintBufSize {
@@ -862,7 +925,7 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 				chunks := mergeSentences(replyText, 100)
 				for _, chunk := range chunks {
 					if chunk != "" && !p.interrupted.Load() {
-						logger.Debugf("[pipeline] TTS 合成: %s", chunk)
+						logger.Infof("[小派] %s", chunk)
 						p.speakText(ctx, chunk)
 					}
 				}
@@ -929,7 +992,7 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 			})
 
 			// 检查是否是音乐播放结果
-			if tc.Function.Name == "play_music" || tc.Function.Name == "next_music" {
+			if tc.Function.Name == "play_music" || tc.Function.Name == "next_music" || tc.Function.Name == "resume_music" {
 				var musicResult tools.MusicResult
 				if jsonErr := json.Unmarshal([]byte(toolResult), &musicResult); jsonErr == nil {
 					if musicResult.Success && (musicResult.URL != "" || musicResult.CacheKey != "") {
@@ -937,6 +1000,25 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 						logger.Infof("[pipeline] 开始播放音乐: %s - %s", musicResult.Artist, musicResult.SongName)
 						p.playMusic(ctx, musicResult.URL, musicResult.CacheKey)
 						// 音乐播放结束后继续
+						return
+					}
+				}
+			}
+
+			// 检查是否是休息命令
+			if tc.Function.Name == "go_to_sleep" {
+				var sleepResult struct {
+					Success bool   `json:"success"`
+					Action  string `json:"action"`
+					Message string `json:"message"`
+				}
+				if jsonErr := json.Unmarshal([]byte(toolResult), &sleepResult); jsonErr == nil {
+					if sleepResult.Success && sleepResult.Action == "sleep" {
+						logger.Info("[pipeline] 用户说休息，停止监听")
+						// 停止连续对话计时器
+						p.stopContinuousTimer()
+						// 直接回到空闲状态
+						p.state.ForceIdle()
 						return
 					}
 				}
@@ -985,11 +1067,13 @@ func (p *Pipeline) identifySpeaker(samples []float32) {
 // enterContinuousMode 进入连续对话模式。
 // 回复完成后不立即回到空闲，而是进入监听状态并启动超时计时器。
 func (p *Pipeline) enterContinuousMode() {
-	// 清空声纹状态
+	// 清空声纹状态，但重新初始化缓冲区（为下一次对话准备）
 	p.contextManager.SetCurrentSpeaker("", nil)
-	p.voiceprintBufMu.Lock()
-	p.voiceprintBuf = nil
-	p.voiceprintBufMu.Unlock()
+	if p.voiceprintMgr != nil && p.voiceprintMgr.NumSpeakers() > 0 {
+		p.voiceprintBufMu.Lock()
+		p.voiceprintBuf = make([]float32, 0, p.voiceprintBufSize)
+		p.voiceprintBufMu.Unlock()
+	}
 
 	if p.cfg.Dialog.ContinuousTimeout <= 0 {
 		// 连续对话模式禁用，直接回到空闲
@@ -1102,10 +1186,35 @@ func (p *Pipeline) interruptSpeak() {
 	}
 	p.speakMu.Unlock()
 
-	// 也停止音乐播放
+	// 暂停音乐播放并保存状态
 	if p.streamPlayer != nil {
 		p.streamPlayer.Stop()
 	}
+
+	// 保存当前播放状态（用于恢复播放）
+	p.savePausedMusic()
+}
+
+// savePausedMusic 保存当前播放状态。
+func (p *Pipeline) savePausedMusic() {
+	if p.playlist == nil {
+		return
+	}
+
+	current := p.playlist.Current()
+	if current == nil {
+		return
+	}
+
+	p.pausedStore.Save(
+		p.playlist.GetItems(),
+		p.playlist.CurrentIndex(),
+		p.playlist.Mode(),
+		current.Song.Name,
+	)
+
+	logger.Infof("[pipeline] 已保存播放状态: %s (索引 %d/%d)",
+		current.Song.Name, p.playlist.CurrentIndex()+1, p.playlist.Len())
 }
 
 // playMusic 播放音乐，播放结束后自动播放列表中的下一首。

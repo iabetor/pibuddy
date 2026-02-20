@@ -2,10 +2,10 @@ package voiceprint
 
 import (
 	"fmt"
-	"github.com/iabetor/pibuddy/internal/logger"
 	"sync"
 
 	"github.com/iabetor/pibuddy/internal/config"
+	"github.com/iabetor/pibuddy/internal/logger"
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
 )
 
@@ -96,9 +96,33 @@ func (m *Manager) Identify(samples []float32) (string, error) {
 
 	name := m.spkMgr.Search(embedding, m.threshold)
 	if name != "" {
-		logger.Debugf("[voiceprint] 识别到用户: %s", name)
+		logger.Infof("[voiceprint] 识别到用户: %s (阈值: %.2f)", name, m.threshold)
+	} else {
+		// 尝试用最低阈值搜索，看看最接近谁（用于调试）
+		bestName := m.spkMgr.Search(embedding, 0.01)
+		if bestName != "" {
+			// 使用 Verify 在不同阈值下检测，粗略估算分数
+			score := m.estimateScore(bestName, embedding)
+			logger.Infof("[voiceprint] 未达阈值，最接近: %s (估算置信度: ~%.2f, 阈值: %.2f)", bestName, score, m.threshold)
+		} else {
+			logger.Infof("[voiceprint] 未识别到任何用户 (阈值: %.2f)", m.threshold)
+		}
 	}
 	return name, nil
+}
+
+// estimateScore 通过二分法 Verify 粗略估算匹配分数（sherpa API 不直接暴露分数）。
+func (m *Manager) estimateScore(name string, embedding []float32) float32 {
+	low, high := float32(0.0), float32(1.0)
+	for i := 0; i < 10; i++ {
+		mid := (low + high) / 2
+		if m.spkMgr.Verify(name, embedding, mid) {
+			low = mid
+		} else {
+			high = mid
+		}
+	}
+	return (low + high) / 2
 }
 
 // Register 注册新用户。audioSamples 是多个音频样本，每个至少 1 秒。

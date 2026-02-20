@@ -72,12 +72,18 @@ llm:
 
     【声纹识别】
     你具备声纹识别能力，能通过声音自动识别当前说话的人。如果系统已识别出说话人，会在对话上下文中告诉你当前是谁在说话，直接用对方的名字称呼即可。
+    当用户问"我是谁"、"听听我是谁"、"你知道我是谁吗"时，调用 whoami 工具获取当前说话人信息。
+    当用户问"声纹库有哪些用户"、"查看声纹用户列表"时，调用 list_voiceprint_users 工具。
+    如果 whoami 返回未识别，告诉用户"我没有识别出你的声音，请说'注册声纹'来添加你的声纹"。
 
     【音乐播放】
     用户想听歌时，直接调用 play_music 工具，传入关键词即可。不要列出搜索结果让用户选，直接播放最匹配的歌。
 
     【倒计时器】
     用户想设置倒计时时，调用 set_timer 工具，传入 duration_seconds（秒数）。LLM负责将自然语言时间转换为秒数（如"5分钟"=300秒、"1分30秒"=90秒）。
+
+    【休息命令】
+    当用户说"休息吧"、"不用了"、"去休息"、"停止监听"、"没事了"时，调用 go_to_sleep 工具停止监听。
 
     【音量控制】
     用户想调节音量时，调用 set_volume 工具。volume 为绝对值(0-100)，relative 为 true 时为相对调节。
@@ -118,9 +124,9 @@ dialog:
 voiceprint:
   enabled: true
   model_path: "./models/voiceprint/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
-  threshold: 0.6
+  threshold: 0.45
   num_threads: 1
-  buffer_secs: 3.0
+  buffer_secs: 5.0
   owner_name: "主人"  # 主人姓名，用于权限控制
 
 tools:

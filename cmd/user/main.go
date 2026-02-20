@@ -89,7 +89,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "用法: pibuddy-user [-config <path>] <command> [args]")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "命令:")
-	fmt.Fprintln(os.Stderr, "  register <用户名>      录制声纹并注册用户（需要 3 个 3 秒样本）")
+	fmt.Fprintln(os.Stderr, "  register <用户名>      录制声纹并注册用户（需要 5 个 4 秒样本）")
 	fmt.Fprintln(os.Stderr, "  list                  列出所有已注册的声纹用户")
 	fmt.Fprintln(os.Stderr, "  delete <用户名>        删除用户及其声纹数据")
 	fmt.Fprintln(os.Stderr, "  set-owner <用户名>     设置用户为主人")
@@ -98,8 +98,8 @@ func printUsage() {
 }
 
 func cmdRegister(mgr *voiceprint.Manager, cfg *config.Config, name string) {
-	const numSamples = 3
-	const sampleDuration = 3 * time.Second
+	const numSamples = 5
+	const sampleDuration = 4 * time.Second
 
 	capture, err := audio.NewCapture(cfg.Audio.SampleRate, cfg.Audio.Channels, cfg.Audio.FrameSize)
 	if err != nil {

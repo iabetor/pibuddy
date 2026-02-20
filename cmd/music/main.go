@@ -37,7 +37,9 @@ func main() {
 	switch command {
 	case "login":
 		if provider == "qq" {
-			if opts.webMode {
+			if opts.cookie != "" {
+				doQQLoginWithCookie(apiURL, dataDir, opts.cookie)
+			} else if opts.webMode {
 				doQQLoginWeb(apiURL, dataDir, opts.port)
 			} else {
 				doQQLogin(apiURL, dataDir)
@@ -62,13 +64,14 @@ func main() {
 type cmdOptions struct {
 	webMode bool
 	port    string
+	cookie  string
 }
 
 func parseArgs() (string, string, cmdOptions) {
 	opts := cmdOptions{port: "8099"}
 
 	if len(os.Args) < 2 {
-		return "netease", "", opts
+		return "qq", "", opts
 	}
 
 	// 收集非 flag 参数
@@ -82,13 +85,18 @@ func parseArgs() (string, string, cmdOptions) {
 				i++
 				opts.port = os.Args[i]
 			}
+		case "--cookie":
+			if i+1 < len(os.Args) {
+				i++
+				opts.cookie = os.Args[i]
+			}
 		default:
 			positional = append(positional, os.Args[i])
 		}
 	}
 
 	if len(positional) == 0 {
-		return "netease", "", opts
+		return "qq", "", opts
 	}
 
 	arg1 := positional[0]
@@ -99,8 +107,8 @@ func parseArgs() (string, string, cmdOptions) {
 		return arg1, positional[1], opts
 	}
 
-	// 默认 netease
-	return "netease", arg1, opts
+	// 默认 qq
+	return "qq", arg1, opts
 }
 
 func printUsage() {
@@ -110,8 +118,8 @@ func printUsage() {
 	fmt.Println("  pibuddy-music [provider] <command> [options]")
 	fmt.Println("")
 	fmt.Println("Provider:")
-	fmt.Println("  netease  网易云音乐 (默认)")
-	fmt.Println("  qq       QQ 音乐")
+	fmt.Println("  qq       QQ 音乐 (默认)")
+	fmt.Println("  netease  网易云音乐")
 	fmt.Println("")
 	fmt.Println("命令:")
 	fmt.Println("  login    登录")
@@ -119,14 +127,16 @@ func printUsage() {
 	fmt.Println("  logout   退出登录")
 	fmt.Println("")
 	fmt.Println("选项:")
-	fmt.Println("  --web    QQ 登录时启动 Web 服务器展示二维码，方便手机扫码")
-	fmt.Println("  --port   Web 服务器端口 (默认: 8099)")
+	fmt.Println("  --web     QQ 登录时启动 Web 服务器展示二维码，方便手机扫码")
+	fmt.Println("  --port    Web 服务器端口 (默认: 8099)")
+	fmt.Println("  --cookie  直接导入浏览器 cookie 字符串 (格式: name1=value1; name2=value2)")
 	fmt.Println("")
 	fmt.Println("示例:")
-	fmt.Println("  pibuddy-music login              # 登录网易云音乐")
-	fmt.Println("  pibuddy-music qq login            # 登录 QQ 音乐（终端扫码）")
-	fmt.Println("  pibuddy-music qq login --web      # 登录 QQ 音乐（手机浏览器扫码）")
-	fmt.Println("  pibuddy-music qq status           # 查看 QQ 音乐登录状态")
+	fmt.Println("  pibuddy-music login              # 登录 QQ 音乐（终端扫码）")
+	fmt.Println("  pibuddy-music login --web        # 登录 QQ 音乐（手机浏览器扫码）")
+	fmt.Println("  pibuddy-music login --cookie '...'  # 导入浏览器 cookie")
+	fmt.Println("  pibuddy-music status             # 查看 QQ 音乐登录状态")
+	fmt.Println("  pibuddy-music netease login      # 登录网易云音乐")
 	fmt.Println("")
 	fmt.Println("环境变量:")
 	fmt.Println("  PIBUDDY_MUSIC_API_URL    API 地址 (网易云默认: http://localhost:3000)")
@@ -314,6 +324,114 @@ func doQQLogin(apiURL, dataDir string) {
 				os.Exit(1)
 			}
 			lastStatus = status
+		}
+	}
+}
+
+// ============================================================
+// QQ 音乐登录（导入浏览器 cookie）
+// ============================================================
+
+func doQQLoginWithCookie(apiURL, dataDir, cookieStr string) {
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "创建数据目录失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	cookiePath := filepath.Join(dataDir, "qq_cookie.json")
+
+	fmt.Println("============================================")
+	fmt.Println("QQ 音乐 Cookie 导入")
+	fmt.Println("============================================")
+	fmt.Println()
+
+	// 解析 cookie 字符串
+	var cookies []http.Cookie
+	for _, part := range strings.Split(cookieStr, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		idx := strings.Index(part, "=")
+		if idx < 1 {
+			continue
+		}
+		name := strings.TrimSpace(part[:idx])
+		value := strings.TrimSpace(part[idx+1:])
+		cookies = append(cookies, http.Cookie{
+			Name:  name,
+			Value: value,
+		})
+	}
+
+	if len(cookies) == 0 {
+		fmt.Fprintln(os.Stderr, "✗ 未解析到有效的 cookie")
+		os.Exit(1)
+	}
+
+	// 提取 UIN
+	var uin string
+	for _, c := range cookies {
+		if c.Name == "uin" || c.Name == "ptui_loginuin" || c.Name == "pt2gguin" {
+			uin = strings.TrimLeft(strings.TrimLeft(c.Value, "o"), "0")
+			break
+		}
+	}
+	if uin == "" {
+		uin = "unknown"
+	}
+
+	// 检查关键 cookie
+	var hasQQMusicKey, hasQmKeyst bool
+	for _, c := range cookies {
+		if c.Name == "qqmusic_key" && c.Value != "" {
+			hasQQMusicKey = true
+		}
+		if c.Name == "qm_keyst" && c.Value != "" {
+			hasQmKeyst = true
+		}
+	}
+
+	// 保存 cookie
+	data := cookieData{
+		Cookies:   cookies,
+		LoggedIn:  true,
+		User:      uin,
+		UpdatedAt: time.Now(),
+	}
+
+	if err := saveCookieData(cookiePath, &data); err != nil {
+		fmt.Fprintf(os.Stderr, "保存 cookie 失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("✓ 导入成功！QQ 号: %s\n", uin)
+	fmt.Printf("✓ Cookie 已保存到: %s (%d 个)\n", cookiePath, len(cookies))
+
+	// 检查关键字段
+	fmt.Println()
+	if hasQQMusicKey && hasQmKeyst {
+		fmt.Println("✓ 关键 cookie 完整 (qqmusic_key, qm_keyst)")
+	} else {
+		fmt.Println("⚠ 缺少关键 cookie:")
+		if !hasQQMusicKey {
+			fmt.Println("  - qqmusic_key (VIP 播放需要)")
+		}
+		if !hasQmKeyst {
+			fmt.Println("  - qm_keyst")
+		}
+		fmt.Println()
+		fmt.Println("请在浏览器登录 y.qq.com 后重新复制完整 cookie")
+	}
+
+	// 同步到 QQMusicApi
+	if apiURL != "" {
+		fmt.Println()
+		fmt.Printf("正在同步到 QQMusicApi (%s)...", apiURL)
+		if err := music.SetQQMusicAPICookie(apiURL, cookies); err != nil {
+			fmt.Printf(" 失败: %v\n", err)
+		} else {
+			fmt.Println(" 完成")
 		}
 	}
 }

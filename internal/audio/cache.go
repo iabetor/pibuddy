@@ -103,13 +103,16 @@ func (mc *MusicCache) TouchLastPlayed(cacheKey string) {
 }
 
 // Search 按关键词模糊搜索缓存索引（name/artist 匹配）。
-// 返回匹配的缓存条目，优先按匹配度排序（歌名+歌手都匹配 > 仅歌名匹配 > 仅歌手匹配），
-// 同等匹配度时按 last_played 倒序排列。
+// 返回匹配的缓存条目，优先按匹配度排序：
+// - 歌名完全匹配 > 歌名包含关键词 > 歌手匹配（需同时有歌名部分匹配）
+// - 同等匹配度时按 last_played 倒序排列。
 func (mc *MusicCache) Search(keyword string) []CacheEntry {
 	mc.mu.RLock()
 	defer mc.mu.RUnlock()
 
 	keyword = strings.ToLower(keyword)
+	// 将关键词拆分为多个词（用于更精确的匹配）
+	keywords := strings.Fields(keyword)
 
 	type scoredEntry struct {
 		entry CacheEntry
@@ -121,10 +124,26 @@ func (mc *MusicCache) Search(keyword string) []CacheEntry {
 		nameLower := strings.ToLower(entry.Name)
 		artistLower := strings.ToLower(entry.Artist)
 
+		// 歌名匹配：关键词包含歌名，或歌名包含关键词
+		nameExactMatch := nameLower == keyword
 		nameMatch := strings.Contains(nameLower, keyword) || strings.Contains(keyword, nameLower)
+
+		// 歌手匹配：歌手包含关键词，或关键词包含歌手
 		artistMatch := strings.Contains(artistLower, keyword) || strings.Contains(keyword, artistLower)
 
-		if !nameMatch && !artistMatch {
+		// 如果关键词是多个词，检查是否有词匹配歌名
+		// 这样 "千里之外 周杰伦" 可以匹配 "千里之外"，但不会匹配 "青花瓷"
+		if !nameMatch && len(keywords) > 1 {
+			for _, kw := range keywords {
+				if len(kw) >= 2 && strings.Contains(nameLower, kw) {
+					nameMatch = true
+					break
+				}
+			}
+		}
+
+		// 必须至少有歌名匹配，单纯歌手匹配不算（避免 "周杰伦" 匹配到所有周杰伦的歌）
+		if !nameMatch {
 			continue
 		}
 
@@ -135,10 +154,13 @@ func (mc *MusicCache) Search(keyword string) []CacheEntry {
 			continue
 		}
 
-		// 计算匹配分数：歌名和歌手都匹配 > 仅歌名匹配 > 仅歌手匹配
+		// 计算匹配分数
+		// 完全匹配歌名 = 10，歌名包含关键词 = 5，歌手匹配 = 2
 		score := 0
-		if nameMatch {
-			score += 1
+		if nameExactMatch {
+			score += 10
+		} else if nameMatch {
+			score += 5
 		}
 		if artistMatch {
 			score += 2

@@ -90,6 +90,19 @@ func (pl *Playlist) Replace(items []PlaylistItem) {
 	logger.Debugf("[playlist] 替换列表为 %d 首歌曲", len(items))
 }
 
+// ReplaceWithIndex 替换播放列表并设置当前索引。
+func (pl *Playlist) ReplaceWithIndex(items []PlaylistItem, index int) {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+	pl.items = items
+	if index >= 0 && index < len(items) {
+		pl.current = index
+	} else {
+		pl.current = -1
+	}
+	logger.Debugf("[playlist] 替换列表为 %d 首歌曲，当前索引: %d", len(items), pl.current)
+}
+
 // Clear 清空播放列表。
 func (pl *Playlist) Clear() {
 	pl.mu.Lock()
@@ -121,6 +134,15 @@ func (pl *Playlist) CurrentIndex() int {
 	pl.mu.RLock()
 	defer pl.mu.RUnlock()
 	return pl.current
+}
+
+// GetItems 返回播放列表的副本。
+func (pl *Playlist) GetItems() []PlaylistItem {
+	pl.mu.RLock()
+	defer pl.mu.RUnlock()
+	items := make([]PlaylistItem, len(pl.items))
+	copy(items, pl.items)
+	return items
 }
 
 // Next 获取下一首歌曲的 URL，根据播放模式决定行为。
