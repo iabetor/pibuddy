@@ -122,6 +122,20 @@ func (db *DB) Migrate() error {
 			value TEXT NOT NULL,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
+		// 故事表
+		`CREATE TABLE IF NOT EXISTS stories (
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL,
+			category TEXT NOT NULL,
+			tags TEXT DEFAULT '[]',
+			content TEXT NOT NULL,
+			word_count INTEGER DEFAULT 0,
+			source TEXT DEFAULT 'local',
+			play_count INTEGER DEFAULT 0,
+			rating REAL DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
 	}
 
 	for _, m := range migrations {
@@ -144,7 +158,52 @@ func (db *DB) Migrate() error {
 		}
 	}
 
+	// 创建故事表索引
+	storyIndexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_stories_title ON stories(title)`,
+		`CREATE INDEX IF NOT EXISTS idx_stories_category ON stories(category)`,
+		`CREATE INDEX IF NOT EXISTS idx_stories_source ON stories(source)`,
+	}
+	for _, idx := range storyIndexes {
+		if _, err := db.Exec(idx); err != nil {
+			logger.Warnf("[database] 创建故事索引失败: %v", err)
+		}
+	}
+
 	logger.Info("[database] 数据库迁移完成")
+	return nil
+}
+
+// InitStories 初始化内置故事数据。
+// sqlPath: SQL 初始化脚本路径，如果为空则使用默认路径。
+func (db *DB) InitStories(sqlPath string) error {
+	if sqlPath == "" {
+		// 默认路径
+		sqlPath = "./scripts/migrations/002_stories_init.sql"
+	}
+
+	// 检查文件是否存在
+	if _, err := os.Stat(sqlPath); os.IsNotExist(err) {
+		logger.Debugf("[database] 故事初始化脚本不存在: %s", sqlPath)
+		return nil
+	}
+
+	// 读取 SQL 文件
+	sqlContent, err := os.ReadFile(sqlPath)
+	if err != nil {
+		return fmt.Errorf("读取故事初始化脚本失败: %w", err)
+	}
+
+	// 执行 SQL
+	if _, err := db.Exec(string(sqlContent)); err != nil {
+		return fmt.Errorf("执行故事初始化脚本失败: %w", err)
+	}
+
+	// 统计导入的故事数量
+	var count int
+	db.QueryRow("SELECT COUNT(*) FROM stories WHERE source = 'local'").Scan(&count)
+	logger.Infof("[database] 已初始化 %d 个内置故事", count)
+
 	return nil
 }
 

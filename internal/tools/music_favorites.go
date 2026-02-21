@@ -255,7 +255,7 @@ func (t *ListFavoritesTool) Execute(ctx context.Context, args json.RawMessage) (
 		songList = append(songList, fmt.Sprintf("%s - %s", s.Name, s.Artist))
 	}
 
-	return fmt.Sprintf(`{"success":true,"message":"你收藏了%d首歌曲","songs":["%s"]}`, 
+	return fmt.Sprintf(`{"success":true,"message":"你收藏了%d首歌曲","songs":["%s"]}`,
 		len(songs), strings.Join(songList, `","`)), nil
 }
 
@@ -323,7 +323,7 @@ func (t *PlayFavoritesTool) Execute(ctx context.Context, args json.RawMessage) (
 	// 获取收藏列表
 	songs, err := t.store.List(userName)
 	if err != nil {
-		return fmt.Sprintf(`{"success":false,"message":"获取收藏列表失败"}`), nil
+		return `{"success":false,"message":"获取收藏列表失败"}`, nil
 	}
 
 	if len(songs) == 0 {

@@ -164,13 +164,30 @@ type ToolsConfig struct {
 	Health        HealthConfig        `yaml:"health"`
 	Ezviz         EzvizConfig         `yaml:"ezviz"`
 	Learning      LearningConfig      `yaml:"learning"`
+	Story         StoryConfig         `yaml:"story"`
 }
 
 // LearningConfig 学习工具配置。
 type LearningConfig struct {
-	Enabled bool             `yaml:"enabled"`
-	English EnglishConfig    `yaml:"english"`
-	Poetry  PoetryAPIConfig  `yaml:"poetry"`
+	Enabled bool            `yaml:"enabled"`
+	English EnglishConfig   `yaml:"english"`
+	Poetry  PoetryAPIConfig `yaml:"poetry"`
+}
+
+// StoryConfig 故事功能配置。
+type StoryConfig struct {
+	Enabled     bool            `yaml:"enabled"`
+	API         StoryAPIConfig  `yaml:"api"`           // 外部 API 配置
+	LLMFallback bool            `yaml:"llm_fallback"`  // LLM 兜底开关
+	OutputMode  string          `yaml:"output_mode"`   // 输出模式：raw（原文朗读）、summarize（LLM 总结）
+}
+
+// StoryAPIConfig 故事 API 配置。
+type StoryAPIConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	BaseURL   string `yaml:"base_url"`
+	AppID     string `yaml:"app_id"`
+	AppSecret string `yaml:"app_secret"`
 }
 
 // EnglishConfig 英语学习配置。
@@ -433,6 +450,14 @@ func setDefaults(cfg *Config) {
 	// 音量控制默认值
 	if cfg.Tools.Volume.Step == 0 {
 		cfg.Tools.Volume.Step = 10
+	}
+
+	// 故事功能默认值
+	if cfg.Tools.Story.API.BaseURL == "" {
+		cfg.Tools.Story.API.BaseURL = "https://www.mxnzp.com"
+	}
+	if cfg.Tools.Story.OutputMode == "" {
+		cfg.Tools.Story.OutputMode = "raw" // 默认原文朗读
 	}
 
 	// 去除 API Key 两端可能的空白（环境变量展开后常见）

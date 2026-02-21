@@ -2,6 +2,7 @@ package asr
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/base64"
@@ -44,6 +45,9 @@ type TencentRTEngine struct {
 	asyncResult   string // 异步识别返回的结果
 	asyncRunning  bool   // 是否正在异步识别中
 	asyncErr      error  // 异步识别错误
+
+	// 取消控制
+	cancel context.CancelFunc // 用于取消正在进行的识别
 
 	// 状态
 	status      EngineStatus
@@ -148,16 +152,21 @@ func (e *TencentRTEngine) GetResult() string {
 		// 裁剪尾部静音，减少发送给 API 的音频时长
 		audioData = trimTrailingSilencePCM(audioData, e.sampleRate)
 
+		// 创建可取消的 context
+		ctx, cancel := context.WithCancel(context.Background())
+		e.cancel = cancel
+
 		// 启动异步识别
 		e.asyncRunning = true
 		go func() {
-			result, err := e.recognize(audioData)
+			result, err := e.recognize(ctx, audioData)
 
 			e.mu.Lock()
 			defer e.mu.Unlock()
 			e.asyncRunning = false
+			e.cancel = nil
 
-			if err != nil {
+			if err != nil && err != context.Canceled {
 				e.asyncErr = err
 				return
 			}
@@ -197,6 +206,18 @@ func (e *TencentRTEngine) Reset() {
 	// 注意：不清理 asyncRunning，让正在运行的 goroutine 自然结束
 }
 
+// Cancel 取消正在进行的识别。
+func (e *TencentRTEngine) Cancel() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	logger.Debugf("[asr] 腾讯云实时语音识别 Cancel() 被调用, cancel=%v, asyncRunning=%v", e.cancel != nil, e.asyncRunning)
+	if e.cancel != nil {
+		e.cancel()
+		e.cancel = nil
+		logger.Debug("[asr] 腾讯云实时语音识别已取消")
+	}
+}
+
 // Close 实现 Engine 接口。
 func (e *TencentRTEngine) Close() {
 	e.connMu.Lock()
@@ -229,7 +250,7 @@ func (e *TencentRTEngine) Status() EngineStatus {
 
 // recognize 使用 WebSocket 进行实时语音识别。
 // 注意：此方法在 goroutine 中调用，不阻塞主循环。
-func (e *TencentRTEngine) recognize(audioData []byte) (string, error) {
+func (e *TencentRTEngine) recognize(ctx context.Context, audioData []byte) (string, error) {
 	// 构建 WebSocket URL
 	wsURL, err := e.buildWebSocketURL()
 	if err != nil {
@@ -297,6 +318,13 @@ func (e *TencentRTEngine) recognize(audioData []byte) (string, error) {
 	// 发送音频数据（不需要模拟实时率，批量快速发送）
 	chunkSize := 6400 // 200ms @ 16kHz 16bit = 6400 bytes
 	for i := 0; i < len(audioData); i += chunkSize {
+		// 检查是否已取消
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+
 		end := i + chunkSize
 		if end > len(audioData) {
 			end = len(audioData)
@@ -305,6 +333,13 @@ func (e *TencentRTEngine) recognize(audioData []byte) (string, error) {
 		if err := conn.WriteMessage(websocket.BinaryMessage, audioData[i:end]); err != nil {
 			return "", fmt.Errorf("发送音频失败: %w", err)
 		}
+	}
+
+	// 检查是否已取消
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	default:
 	}
 
 	// 发送结束帧
@@ -316,6 +351,8 @@ func (e *TencentRTEngine) recognize(audioData []byte) (string, error) {
 
 	// 等待结果
 	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
 	case result := <-resultChan:
 		result = strings.TrimSpace(result)
 		if result != "" {

@@ -273,6 +273,16 @@ func (e *FallbackEngine) Reset() {
 	}
 }
 
+// Cancel 取消正在进行的识别。
+func (e *FallbackEngine) Cancel() {
+	// 取消所有支持取消的引擎
+	for _, engine := range e.engines {
+		if c, ok := engine.(interface{ Cancel() }); ok {
+			c.Cancel()
+		}
+	}
+}
+
 // Close 实现 Engine 接口。
 func (e *FallbackEngine) Close() {
 	for _, engine := range e.engines {

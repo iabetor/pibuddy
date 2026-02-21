@@ -125,6 +125,11 @@ func New(cfg *config.Config) (*Pipeline, error) {
 		return nil, fmt.Errorf("数据库迁移失败: %w", err)
 	}
 
+	// 初始化内置故事
+	if err := p.db.InitStories(""); err != nil {
+		logger.Warnf("[pipeline] 初始化内置故事失败: %v", err)
+	}
+
 	// 音频采集（16kHz 单声道）
 	p.capture, err = audio.NewCapture(cfg.Audio.SampleRate, cfg.Audio.Channels, cfg.Audio.FrameSize)
 	if err != nil {
@@ -517,6 +522,35 @@ func (p *Pipeline) initTools(cfg *config.Config) error {
 			p.toolRegistry.Register(tools.NewPoetrySearchTool(cfg.Tools.Learning.Poetry.APIKey))
 			p.toolRegistry.Register(tools.NewPoetryGameTool(cfg.Tools.Learning.Poetry.APIKey))
 			logger.Info("[pipeline] 古诗词工具已启用")
+		}
+	}
+
+	// 故事工具
+	if cfg.Tools.Story.Enabled {
+		logger.Debugf("[pipeline] 故事 API 配置: enabled=%v, app_id=%s", cfg.Tools.Story.API.Enabled, cfg.Tools.Story.API.AppID)
+		// 初始化故事库（使用统一数据库）
+		storyStore, err := tools.NewStoryStore(p.db)
+		if err != nil {
+			logger.Warnf("[pipeline] 初始化故事库失败: %v", err)
+		}
+
+		// 初始化故事 API
+		var storyAPI *tools.StoryAPI
+		if cfg.Tools.Story.API.Enabled {
+			storyAPI = tools.NewStoryAPI(
+				cfg.Tools.Story.API.BaseURL,
+				cfg.Tools.Story.API.AppID,
+				cfg.Tools.Story.API.AppSecret,
+			)
+		}
+
+		// 注册故事工具
+		if storyStore != nil {
+			p.toolRegistry.Register(tools.NewTellStoryTool(storyStore, storyAPI, cfg.Tools.Story.LLMFallback, cfg.Tools.Story.OutputMode))
+			p.toolRegistry.Register(tools.NewListStoriesTool(storyStore))
+			p.toolRegistry.Register(tools.NewSaveStoryTool(storyStore))
+			p.toolRegistry.Register(tools.NewDeleteStoryTool(storyStore))
+			logger.Infof("[pipeline] 故事工具已启用，本地库 %d 个故事", storyStore.Count())
 		}
 	}
 
@@ -1036,6 +1070,19 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 				}
 			}
 
+			// 检查是否是故事结果且需要跳过 LLM
+			if tc.Function.Name == "tell_story" {
+				var storyResult tools.StoryResult
+				if jsonErr := json.Unmarshal([]byte(toolResult), &storyResult); jsonErr == nil {
+					if storyResult.SkipLLM && storyResult.Success && storyResult.Content != "" {
+						// 直接送 TTS，跳过 LLM
+						logger.Infof("[pipeline] 直接朗读故事（跳过LLM）: %s", storyResult.Title)
+						p.speakText(ctx, storyResult.Content)
+						return
+					}
+				}
+			}
+
 			// 检查是否是休息命令
 			if tc.Function.Name == "go_to_sleep" {
 				var sleepResult struct {
@@ -1143,6 +1190,13 @@ func (p *Pipeline) startContinuousTimer() {
 	p.continuousTimer = time.AfterFunc(time.Duration(p.cfg.Dialog.ContinuousTimeout)*time.Second, func() {
 		if p.state.Current() == StateListening {
 			logger.Info("[pipeline] 连续对话超时，回到空闲状态")
+			// 取消正在进行的 ASR 请求
+			if canceler, ok := p.recognizer.(interface{ Cancel() }); ok {
+				logger.Debug("[pipeline] 调用 ASR Cancel()")
+				canceler.Cancel()
+			} else {
+				logger.Debug("[pipeline] ASR 引擎不支持 Cancel()")
+			}
 			p.state.ForceIdle()
 		}
 	})
@@ -1165,39 +1219,126 @@ func (p *Pipeline) resetContinuousTimer() {
 	p.startContinuousTimer()
 }
 
-// speakText 合成并播放单段文本。
+// speakText 合成并播放文本。
 // 如果主 TTS 引擎失败且有备用引擎，则使用备用引擎播放错误提示。
+// 支持自动分段处理长文本。
 func (p *Pipeline) speakText(ctx context.Context, text string) {
-	p.speakTextWithFallback(ctx, text)
+	// 腾讯云一句话 TTS 限制约 150 字符，设置分段阈值
+	const maxTextLen = 150
+
+	// 如果文本不长，直接合成
+	if len([]rune(text)) <= maxTextLen {
+		p.speakTextWithFallback(ctx, text)
+		return
+	}
+
+	// 长文本分段处理
+	segments := p.splitTextForTTS(text, maxTextLen)
+	logger.Infof("[pipeline] 长文本分段: %d 段", len(segments))
+
+	for i, segment := range segments {
+		// 跳过空段
+		if len(strings.TrimSpace(segment)) == 0 {
+			continue
+		}
+
+		// 检查是否被打断
+		select {
+		case <-ctx.Done():
+			logger.Debug("[pipeline] 长文本播放被打断")
+			return
+		default:
+		}
+
+		logger.Infof("[pipeline] 播放第 %d/%d 段 (%d 字)", i+1, len(segments), len([]rune(segment)))
+		if err := p.speakTextWithFallbackAndReturn(ctx, segment); err != nil {
+			logger.Warnf("[pipeline] 第 %d 段播放失败: %v", i+1, err)
+			// 继续播放下一段
+		}
+	}
+}
+
+// splitTextForTTS 将长文本分段，优先在句子边界切分
+func (p *Pipeline) splitTextForTTS(text string, maxLen int) []string {
+	runes := []rune(text)
+	if len(runes) <= maxLen {
+		return []string{text}
+	}
+
+	var segments []string
+	start := 0
+
+	for start < len(runes) {
+		end := start + maxLen
+		if end >= len(runes) {
+			// 最后一段
+			segments = append(segments, string(runes[start:]))
+			break
+		}
+
+		// 在 maxLen 范围内找句子边界（句号、感叹号、问号、换行）
+		bestSplit := -1
+		for i := end; i >= start+maxLen/2 && i > start; i-- {
+			r := runes[i-1]
+			if r == '。' || r == '！' || r == '？' || r == '；' || r == '\n' {
+				bestSplit = i
+				break
+			}
+		}
+
+		// 如果没找到句子边界，尝试逗号
+		if bestSplit == -1 {
+			for i := end; i >= start+maxLen/2 && i > start; i-- {
+				if runes[i-1] == '，' || runes[i-1] == '、' {
+					bestSplit = i
+					break
+				}
+			}
+		}
+
+		// 如果还是没找到，强制在 maxLen 处切分
+		if bestSplit == -1 {
+			bestSplit = end
+		}
+
+		segments = append(segments, string(runes[start:bestSplit]))
+		start = bestSplit
+	}
+
+	return segments
 }
 
 // speakTextWithFallback 使用主 TTS 引擎合成并播放文本，失败时使用备用引擎。
 // 如果主引擎是余额不足错误，使用备用引擎播放提示信息。
 func (p *Pipeline) speakTextWithFallback(ctx context.Context, text string) {
+	_ = p.speakTextWithFallbackAndReturn(ctx, text)
+}
+
+// speakTextWithFallbackAndReturn 使用主 TTS 引擎合成并播放文本，返回错误信息。
+func (p *Pipeline) speakTextWithFallbackAndReturn(ctx context.Context, text string) error {
 	samples, sampleRate, err := p.ttsEngine.Synthesize(ctx, text)
 	if err != nil {
 		logger.Errorf("[pipeline] TTS 合成失败: %v", err)
-		// 尝试使用备用引擎
+		// 尝试使用备用引擎合成原文（分段场景下不播放错误提示）
 		if p.fallbackTtsEngine != nil {
-			// 检查是否为余额不足错误
-			fallbackText := "语音合成失败，请检查网络连接"
-			if tts.IsInsufficientBalance(err) {
-				fallbackText = "语音合成余额不足，请充值后再试"
-			}
-			if fbSamples, fbRate, fbErr := p.fallbackTtsEngine.Synthesize(ctx, fallbackText); fbErr == nil && len(fbSamples) > 0 {
-				logger.Info("[pipeline] 使用备用 TTS 引擎播放错误提示")
+			if fbSamples, fbRate, fbErr := p.fallbackTtsEngine.Synthesize(ctx, text); fbErr == nil && len(fbSamples) > 0 {
+				logger.Info("[pipeline] 使用备用 TTS 引擎播放")
 				p.playSamples(ctx, fbSamples, fbRate)
+				return nil
 			} else if fbErr != nil {
 				logger.Errorf("[pipeline] 备用 TTS 也失败: %v", fbErr)
+				return fbErr
 			}
 		}
-		return
+		return err
 	}
 	if len(samples) == 0 {
-		return
+		logger.Warn("[pipeline] TTS 合成返回空音频")
+		return fmt.Errorf("TTS 合成返回空音频")
 	}
 
 	p.playSamples(ctx, samples, sampleRate)
+	return nil
 }
 
 // playSamples 播放音频样本。

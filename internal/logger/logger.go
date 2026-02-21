@@ -58,12 +58,14 @@ func Init(cfg Config) error {
 		TimeKey:        "T",
 		LevelKey:       "L",
 		NameKey:        "N",
+		CallerKey:      "C",  // 添加调用者信息（文件名:行号）
 		MessageKey:     "M",
 		StacktraceKey:  "S",
 		LineEnding:     zapcore.DefaultLineEnding,
 		EncodeLevel:    zapcore.CapitalLevelEncoder,
 		EncodeTime:     zapcore.ISO8601TimeEncoder,
 		EncodeDuration: zapcore.StringDurationEncoder,
+		EncodeCaller:   zapcore.ShortCallerEncoder,  // 短格式：相对路径
 	}
 
 	// 确定输出目标
@@ -105,7 +107,7 @@ func Init(cfg Config) error {
 		zapLevel,
 	)
 
-	Z = zap.New(core, zap.AddCallerSkip(1))
+	Z = zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
 	L = Z.Sugar()
 	return nil
 }
