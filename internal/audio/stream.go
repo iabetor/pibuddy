@@ -239,22 +239,20 @@ preBufferLoop:
 				if pos >= len(pcmData) {
 					// 当前块播完，尝试获取下一块
 					// 先用阻塞方式等待，避免不必要的静音间隙
-					select {
-					case chunk, ok := <-sampleCh:
-						if !ok {
-							// 所有数据播完，填充剩余部分为静音
-							for i := writePos; i < totalBytes; i++ {
-								outputSamples[i] = 0
-							}
-							select {
-							case done <- struct{}{}:
-							default:
-							}
-							return
+					chunk, ok := <-sampleCh
+					if !ok {
+						// 所有数据播完，填充剩余部分为静音
+						for i := writePos; i < totalBytes; i++ {
+							outputSamples[i] = 0
 						}
-						pcmData = Float32ToBytes(chunk)
-						pos = 0
+						select {
+						case done <- struct{}{}:
+						default:
+						}
+						return
 					}
+					pcmData = Float32ToBytes(chunk)
+					pos = 0
 				}
 
 				end := pos + (totalBytes - writePos)
@@ -729,21 +727,19 @@ preBufferFileLoop:
 
 			for writePos < totalBytes {
 				if pos >= len(pcmData) {
-					select {
-					case chunk, ok := <-sampleCh:
-						if !ok {
-							for i := writePos; i < totalBytes; i++ {
-								outputSamples[i] = 0
-							}
-							select {
-							case done <- struct{}{}:
-							default:
-							}
-							return
+					chunk, ok := <-sampleCh
+					if !ok {
+						for i := writePos; i < totalBytes; i++ {
+							outputSamples[i] = 0
 						}
-						pcmData = Float32ToBytes(chunk)
-						pos = 0
+						select {
+						case done <- struct{}{}:
+						default:
+						}
+						return
 					}
+					pcmData = Float32ToBytes(chunk)
+					pos = 0
 				}
 
 				end := pos + (totalBytes - writePos)
@@ -949,21 +945,19 @@ preBufferFileLoop:
 
 			for writePos < totalBytes {
 				if pos >= len(pcmData) {
-					select {
-					case chunk, ok := <-sampleCh:
-						if !ok {
-							for i := writePos; i < totalBytes; i++ {
-								outputSamples[i] = 0
-							}
-							select {
-							case done <- struct{}{}:
-							default:
-							}
-							return
+					chunk, ok := <-sampleCh
+					if !ok {
+						for i := writePos; i < totalBytes; i++ {
+							outputSamples[i] = 0
 						}
-						pcmData = Float32ToBytes(chunk)
-						pos = 0
+						select {
+						case done <- struct{}{}:
+						default:
+						}
+						return
 					}
+					pcmData = Float32ToBytes(chunk)
+					pos = 0
 				}
 
 				end := pos + (totalBytes - writePos)
