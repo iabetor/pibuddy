@@ -112,11 +112,17 @@ func (p *OpenAIProvider) ChatStreamWithTools(ctx context.Context, messages []Mes
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		// 检查是否为余额不足错误 (DeepSeek 返回 402)
-		if resp.StatusCode == 402 {
-			return nil, nil, fmt.Errorf("[llm] API 返回状态码 402: %s: %w", string(body), ErrInsufficientBalance)
+		bodyStr := string(body)
+		bodyLower := strings.ToLower(bodyStr)
+		// 检查是否为余额不足/额度耗尽错误
+		// DeepSeek: HTTP 402 + "Insufficient Balance"
+		// 千问 DashScope: HTTP 429 + quota 相关
+		// 火山方舟: HTTP 429 + rate limit / quota
+		if resp.StatusCode == 402 ||
+			(resp.StatusCode == 429 && (strings.Contains(bodyLower, "quota") || strings.Contains(bodyLower, "insufficient"))) {
+			return nil, nil, fmt.Errorf("[llm] API 返回状态码 %d: %s: %w", resp.StatusCode, bodyStr, ErrInsufficientBalance)
 		}
-		return nil, nil, fmt.Errorf("[llm] API 返回状态码 %d: %s", resp.StatusCode, string(body))
+		return nil, nil, fmt.Errorf("[llm] API 返回状态码 %d: %s", resp.StatusCode, bodyStr)
 	}
 
 	textCh := make(chan string)

@@ -106,8 +106,21 @@ type ASRTencentConfig struct {
 	AppID     string `yaml:"app_id"`  // 实时语音识别需要
 }
 
+// LLMModelConfig 单个 LLM 模型配置。
+type LLMModelConfig struct {
+	Name   string `yaml:"name"`    // 显示名称，如 "qwen-turbo"
+	APIURL string `yaml:"api_url"` // API 地址
+	APIKey string `yaml:"api_key"` // API Key
+	Model  string `yaml:"model"`   // 模型名称或接入点 ID
+}
+
 // LLMConfig 大模型对话配置。
 type LLMConfig struct {
+	// Models 多模型优先级列表，按顺序尝试，失败自动切换到下一个。
+	// 当此列表非空时，忽略下方的 provider/api_url/api_key/model 字段。
+	Models []LLMModelConfig `yaml:"models"`
+
+	// 以下为兼容旧配置的单模型字段（当 Models 为空时使用）
 	Provider     string `yaml:"provider"`
 	APIURL       string `yaml:"api_url"`
 	APIKey       string `yaml:"api_key"`
@@ -462,4 +475,19 @@ func setDefaults(cfg *Config) {
 
 	// 去除 API Key 两端可能的空白（环境变量展开后常见）
 	cfg.LLM.APIKey = strings.TrimSpace(cfg.LLM.APIKey)
+	// 多模型配置：trim 所有 API Key
+	for i := range cfg.LLM.Models {
+		cfg.LLM.Models[i].APIKey = strings.TrimSpace(cfg.LLM.Models[i].APIKey)
+	}
+	// 兼容旧配置：如果 Models 为空且旧字段有值，构建单元素 Models 列表
+	if len(cfg.LLM.Models) == 0 && cfg.LLM.APIURL != "" {
+		cfg.LLM.Models = []LLMModelConfig{
+			{
+				Name:   cfg.LLM.Model,
+				APIURL: cfg.LLM.APIURL,
+				APIKey: cfg.LLM.APIKey,
+				Model:  cfg.LLM.Model,
+			},
+		}
+	}
 }

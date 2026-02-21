@@ -164,8 +164,29 @@ func New(cfg *config.Config) (*Pipeline, error) {
 		return nil, fmt.Errorf("初始化 ASR 失败: %w", err)
 	}
 
-	// 大模型提供者
-	p.llmProvider = llm.NewOpenAIProvider(cfg.LLM.APIURL, cfg.LLM.APIKey, cfg.LLM.Model)
+	// 大模型提供者（支持多模型自动降级）
+	if len(cfg.LLM.Models) > 1 {
+		modelConfigs := make([]llm.ModelConfig, len(cfg.LLM.Models))
+		for i, m := range cfg.LLM.Models {
+			modelConfigs[i] = llm.ModelConfig{
+				Name:   m.Name,
+				APIURL: m.APIURL,
+				APIKey: m.APIKey,
+				Model:  m.Model,
+			}
+		}
+		multiProvider, err := llm.NewMultiProvider(modelConfigs)
+		if err != nil {
+			p.Close()
+			return nil, fmt.Errorf("初始化多 LLM 失败: %w", err)
+		}
+		p.llmProvider = multiProvider
+	} else if len(cfg.LLM.Models) == 1 {
+		m := cfg.LLM.Models[0]
+		p.llmProvider = llm.NewOpenAIProvider(m.APIURL, m.APIKey, m.Model)
+	} else {
+		p.llmProvider = llm.NewOpenAIProvider(cfg.LLM.APIURL, cfg.LLM.APIKey, cfg.LLM.Model)
+	}
 	p.contextManager = llm.NewContextManager(cfg.LLM.SystemPrompt, cfg.LLM.MaxHistory)
 
 	// TTS 引擎

@@ -36,6 +36,50 @@ asr:
     app_id: "${PIBUDDY_TENCENT_APP_ID}"  # 实时语音识别需要，在控制台获取
 
 llm:
+  # 多模型优先级列表，按顺序尝试，额度用完/请求失败自动切换到下一个
+  # 千问免费额度：每个模型各 100 万 token（2026/05/22 过期）
+  # 火山方舟免费额度：豆包全系模型 50 万 token
+  # 腾讯混元免费额度：新用户 100 万 token（共享）
+  # DeepSeek：付费，作为最终兜底
+  models:
+    # --- 通义千问（阿里 DashScope，快速模型优先）---
+    - name: "qwen-turbo"
+      api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      api_key: "${PIBUDDY_QWEN_API_KEY}"
+      model: "qwen-turbo"
+    - name: "qwen-flash"
+      api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      api_key: "${PIBUDDY_QWEN_API_KEY}"
+      model: "qwen-flash"
+    - name: "qwen-plus"
+      api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      api_key: "${PIBUDDY_QWEN_API_KEY}"
+      model: "qwen-plus"
+    - name: "qwen-max"
+      api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      api_key: "${PIBUDDY_QWEN_API_KEY}"
+      model: "qwen-max"
+    # --- 腾讯混元 ---
+    - name: "hunyuan-lite"
+      api_url: "https://api.hunyuan.cloud.tencent.com/v1"
+      api_key: "${PIBUDDY_HUNYUAN_API_KEY}"
+      model: "hunyuan-lite"
+    - name: "hunyuan-turbo"
+      api_url: "https://api.hunyuan.cloud.tencent.com/v1"
+      api_key: "${PIBUDDY_HUNYUAN_API_KEY}"
+      model: "hunyuan-turbo"
+    # --- 火山方舟（字节豆包）---
+    - name: "doubao"
+      api_url: "https://ark.cn-beijing.volces.com/api/v3"
+      api_key: "${PIBUDDY_ARK_API_KEY}"
+      model: "${PIBUDDY_ARK_ENDPOINT_ID}"
+    # --- DeepSeek（付费兜底）---
+    - name: "deepseek-chat"
+      api_url: "https://api.deepseek.com/v1"
+      api_key: "${PIBUDDY_LLM_API_KEY}"
+      model: "deepseek-chat"
+
+  # 以下为兼容旧配置（当 models 列表为空时使用）
   provider: "openai"
   api_url: "https://api.deepseek.com/v1"
   api_key: "${PIBUDDY_LLM_API_KEY}"
