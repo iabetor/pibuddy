@@ -972,7 +972,7 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 			} else if p.fallbackTtsEngine != nil {
 				// 使用备用 TTS 播放错误提示
 				p.state.SetState(StateSpeaking)
-				p.speakText(ctx, "网络连接失败，请检查网络设置")
+				p.speakText(queryCtx, "网络连接失败，请检查网络设置")
 			}
 			p.state.ForceIdle()
 			return
@@ -1012,7 +1012,7 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 				for _, chunk := range chunks {
 					if chunk != "" && !p.interrupted.Load() {
 						logger.Infof("[小派] %s", chunk)
-						p.speakText(ctx, chunk)
+						p.speakText(queryCtx, chunk)
 					}
 				}
 			}
@@ -1098,7 +1098,12 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 					if storyResult.SkipLLM && storyResult.Success && storyResult.Content != "" {
 						// 直接送 TTS，跳过 LLM
 						logger.Infof("[pipeline] 直接朗读故事（跳过LLM）: %s", storyResult.Title)
-						p.speakText(ctx, storyResult.Content)
+						p.state.Transition(StateSpeaking)
+						p.speakText(queryCtx, storyResult.Content) // 使用 queryCtx 以支持打断
+						// 播放完成后进入连续对话模式
+						if !p.interrupted.Load() {
+							p.enterContinuousMode()
+						}
 						return
 					}
 				}
