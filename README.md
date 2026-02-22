@@ -10,7 +10,7 @@
 - **多引擎 TTS**：腾讯云 TTS（国内推荐）、Edge TTS（国际）、Piper TTS（离线）
 - **打断与连续对话**：播放时说唤醒词可打断，支持连续对话模式
 
-### 智能工具 (20+)
+### 智能工具 (25+)
 通过 Function Calling 支持丰富的语音操控：
 
 | 类别 | 功能示例 |
@@ -24,6 +24,11 @@
 | 📝 备忘录 | "记一下明天要带伞"、"查看备忘录" |
 | 📰 新闻播报 | "有什么新闻" |
 | 📈 股票行情 | "贵州茅台股价多少" |
+| 📚 讲故事 | "讲个小马过河的故事"、"讲个睡前故事" |
+| 🏠 智能家居 | "打开客厅灯"、"把空调调到26度" |
+| 🌐 翻译 | "把你好翻译成英语" |
+| 💊 健康提醒 | "提醒我每小时站起来活动" |
+| 🎓 学习工具 | "每日一句英语"、"飞花令"、"诗词接龙" |
 
 ### 音乐播放
 - **语音点歌**：说"播放小星星"、"我想听周杰伦的歌"
@@ -36,6 +41,20 @@
 - **语音订阅**："订阅 XXX 网站的 RSS"
 - **内容播报**："有什么新消息"、"看看科技资讯"
 - **按来源/关键词过滤**："看看 RSS 里关于 AI 的内容"
+
+### 讲故事
+- **内置故事库**：58 个经典故事（童话、寓言、成语故事等）
+- **外部 API 扩展**：mxnzp 故事大全 API
+- **LLM 兜底**：定制化故事生成
+- **零 Token 模式**：原文朗读，完全绕过 LLM
+
+语音示例：
+```
+"讲个小马过河的故事"
+"讲个睡前故事"
+"讲一个关于勇气的故事"
+"简单讲一下荆轲刺秦王的故事"  # LLM 总结版
+```
 
 ### 声纹识别
 - **自动识别说话人**：每次对话前自动识别用户身份
@@ -134,13 +153,33 @@ bash scripts/setup.sh
 ### 4. 配置 API Key
 
 ```bash
-# 方法 A: 环境变量文件
-echo 'PIBUDDY_LLM_API_KEY=sk-your-key-here' > /home/pi/pibuddy/.env
-echo 'PIBUDDY_TENCENT_SECRET_ID=your-id' >> /home/pi/pibuddy/.env
-echo 'PIBUDDY_TENCENT_SECRET_KEY=your-key' >> /home/pi/pibuddy/.env
-echo 'PIBUDDY_WEATHER_API_KEY=your-key' >> /home/pi/pibuddy/.env
+# 编辑环境变量文件
+nano ~/.bashrc  # 或 ~/.zshrc
 
-# 方法 B: 直接在配置文件中设置
+# LLM Provider Keys（多 Provider 支持，按顺序自动降级）
+export PIBUDDY_QWEN_API_KEY='your-qwen-key'          # 通义千问 (推荐，免费400万token)
+export PIBUDDY_HUNYUAN_API_KEY='your-hunyuan-key'    # 腾讯混元 (免费100万token)
+export PIBUDDY_ARK_API_KEY='your-ark-key'            # 火山方舟 (免费50万token)
+export PIBUDDY_ARK_ENDPOINT_ID='your-endpoint-id'    # 火山方舟接入点ID
+export PIBUDDY_LLM_API_KEY='your-deepseek-key'       # DeepSeek (付费兜底)
+
+# 腾讯云服务 (TTS, ASR, 翻译)
+export PIBUDDY_TENCENT_SECRET_ID='your-secret-id'
+export PIBUDDY_TENCENT_SECRET_KEY='your-secret-key'
+export PIBUDDY_TENCENT_APP_ID='your-app-id'
+
+# 其他服务
+export PIBUDDY_QWEATHER_API_KEY='your-qweather-key'  # 和风天气
+export PIBUDDY_HA_TOKEN='your-homeassistant-token'   # Home Assistant
+export PIBUDDY_EZVIZ_AK='your-ezviz-ak'              # 萤石门锁
+export PIBUDDY_EZVIZ_SK='your-ezviz-sk'
+
+# 使环境变量生效
+source ~/.bashrc
+```
+
+也可以直接编辑配置文件：
+```bash
 nano /home/pi/pibuddy/configs/pibuddy.yaml
 ```
 
@@ -171,14 +210,32 @@ bash scripts/setup-mac.sh
 
 ### 配置 LLM
 
-编辑 `configs/pibuddy.yaml`，设置你的 LLM 后端（以 DeepSeek 为例）：
+编辑 `configs/pibuddy.yaml`，设置你的 LLM 后端。支持多 Provider 自动降级：
 
 ```yaml
 llm:
-  provider: "openai"
-  api_url: "https://api.deepseek.com/v1"
-  api_key: "${PIBUDDY_LLM_API_KEY}"
-  model: "deepseek-chat"
+  # 多模型优先级列表，按顺序尝试，额度用完自动切换到下一个
+  models:
+    # 通义千问（免费额度最大，推荐）
+    - name: "qwen-turbo"
+      api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      api_key: "${PIBUDDY_QWEN_API_KEY}"
+      model: "qwen-turbo"
+    # 腾讯混元
+    - name: "hunyuan-lite"
+      api_url: "https://api.hunyuan.cloud.tencent.com/v1"
+      api_key: "${PIBUDDY_HUNYUAN_API_KEY}"
+      model: "hunyuan-lite"
+    # 火山方舟（豆包）
+    - name: "doubao"
+      api_url: "https://ark.cn-beijing.volces.com/api/v3"
+      api_key: "${PIBUDDY_ARK_API_KEY}"
+      model: "${PIBUDDY_ARK_ENDPOINT_ID}"
+    # DeepSeek（付费兜底）
+    - name: "deepseek-chat"
+      api_url: "https://api.deepseek.com/v1"
+      api_key: "${PIBUDDY_LLM_API_KEY}"
+      model: "deepseek-chat"
 ```
 
 ### 运行
@@ -348,10 +405,18 @@ asr:
   num_threads: 2
 
 llm:
+  # 多模型配置（推荐）
+  models:
+    - name: "qwen-turbo"
+      api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      api_key: "${PIBUDDY_QWEN_API_KEY}"
+      model: "qwen-turbo"
+    # ... 更多模型
+  # 兼容旧配置（models 为空时使用）
   provider: "openai"
-  api_url: "https://api.openai.com/v1"
+  api_url: "https://api.deepseek.com/v1"
   api_key: "${PIBUDDY_LLM_API_KEY}"
-  model: "gpt-4o-mini"
+  model: "deepseek-chat"
   max_history: 10
   max_tokens: 500
 
@@ -418,9 +483,51 @@ pibuddy/
 └── README.md
 ```
 
-## 使用其他 LLM
+## 多 LLM Provider 支持
 
-PiBuddy 兼容所有 OpenAI 协议的 API，包括：
+PiBuddy 支持多 LLM Provider 自动降级，最大化利用免费额度：
+
+| Provider | 免费额度 | 有效期 | 说明 |
+|----------|---------|--------|------|
+| 通义千问 | 400万 token | 各模型100万，2026/05/22 | qwen-turbo/flash/plus/max |
+| 腾讯混元 | 100万 token | 新用户共享 | hunyuan-lite/turbo |
+| 火山方舟 | 50万 token | 豆包全系共享 | 需创建接入点 |
+| DeepSeek | 付费 | — | 作为最终兜底 |
+
+**总计约 550 万 token 免费额度**，按每次对话 200-500 token 计算，可支持约 11000-27500 次对话。
+
+### 配置示例
+
+```yaml
+llm:
+  models:
+    # 通义千问（快速模型优先）
+    - name: "qwen-turbo"
+      api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      api_key: "${PIBUDDY_QWEN_API_KEY}"
+      model: "qwen-turbo"
+    - name: "qwen-flash"
+      api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      api_key: "${PIBUDDY_QWEN_API_KEY}"
+      model: "qwen-flash"
+    # 腾讯混元
+    - name: "hunyuan-lite"
+      api_url: "https://api.hunyuan.cloud.tencent.com/v1"
+      api_key: "${PIBUDDY_HUNYUAN_API_KEY}"
+      model: "hunyuan-lite"
+    # 火山方舟
+    - name: "doubao"
+      api_url: "https://ark.cn-beijing.volces.com/api/v3"
+      api_key: "${PIBUDDY_ARK_API_KEY}"
+      model: "${PIBUDDY_ARK_ENDPOINT_ID}"
+    # DeepSeek（付费兜底）
+    - name: "deepseek-chat"
+      api_url: "https://api.deepseek.com/v1"
+      api_key: "${PIBUDDY_LLM_API_KEY}"
+      model: "deepseek-chat"
+```
+
+### 兼容其他 OpenAI 协议 API
 
 - **OpenAI**: 直接使用
 - **DeepSeek**: `api_url: "https://api.deepseek.com/v1"`, `model: "deepseek-chat"`
@@ -431,8 +538,11 @@ PiBuddy 兼容所有 OpenAI 协议的 API，包括：
 
 | 依赖 | 用途 | 获取方式 |
 |------|------|----------|
-| LLM API | 大模型对话 | [OpenAI](https://openai.com) / [DeepSeek](https://platform.deepseek.com) |
-| 腾讯云 TTS | 语音合成（国内推荐） | [腾讯云控制台](https://console.cloud.tencent.com/tts) |
+| 通义千问 | LLM（推荐，免费额度大） | [阿里云 DashScope](https://dashscope.console.aliyun.com) |
+| 腾讯混元 | LLM（免费） | [腾讯云混元](https://console.cloud.tencent.com/hunyuan) |
+| 火山方舟 | LLM（豆包，免费） | [火山方舟](https://console.volcengine.com/ark) |
+| DeepSeek | LLM（付费兜底） | [DeepSeek 开放平台](https://platform.deepseek.com) |
+| 腾讯云 TTS/ASR | 语音合成/识别 | [腾讯云控制台](https://console.cloud.tencent.com/tts) |
 | 和风天气 | 天气查询 | [和风天气开发平台](https://dev.qweather.com) |
 | QQAFLMusicApi | QQ 音乐服务 | [GitHub](https://github.com/QiuChenlyOpenSource/QQAFLMusicApi) |
 | NeteaseCloudMusicApi | 网易云音乐服务 | [GitLab](https://gitlab.com/Binaryify/NeteaseCloudMusicApi) |
