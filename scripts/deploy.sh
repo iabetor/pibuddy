@@ -10,7 +10,7 @@ INSTALL_DIR="${SCRIPT_DIR}"
 echo "=== 部署目录: ${INSTALL_DIR} ==="
 
 # 创建必要目录
-mkdir -p ${INSTALL_DIR}/{logs}
+mkdir -p ${INSTALL_DIR}/logs
 
 # 设置权限
 chmod +x ${INSTALL_DIR}/bin/pibuddy
