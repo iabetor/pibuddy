@@ -7,13 +7,13 @@ Wants=network-online.target
 Type=simple
 User=pi
 Group=audio
-WorkingDirectory=/home/pi/pibuddy
-ExecStart=/home/pi/pibuddy/pibuddy -config /home/pi/pibuddy/configs/pibuddy.yaml
+WorkingDirectory=/opt/pibuddy
+ExecStart=/opt/pibuddy/pibuddy -config /opt/pibuddy/configs/pibuddy.yaml
 Restart=on-failure
 RestartSec=5
 
 # Environment — set API key here or in /home/pi/pibuddy/.env
-EnvironmentFile=-/home/pi/pibuddy/.env
+EnvironmentFile=-/opt/pibuddy/.env
 
 # Logging
 StandardOutput=journal
@@ -24,7 +24,7 @@ SyslogIdentifier=pibuddy
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/pi/pibuddy
+ReadWritePaths=/opt/pibuddy
 
 # Allow audio device access
 SupplementaryGroups=audio
