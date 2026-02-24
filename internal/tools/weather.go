@@ -322,7 +322,7 @@ func (t *WeatherTool) getNow(ctx context.Context, locationID string) (string, er
 	}
 
 	n := resp.Now
-	return fmt.Sprintf("实时: %s, 温度%s°C, 体感%s°C, %s%s级, 湿度%s%%",
+	return fmt.Sprintf("实时: %s, 温度%s摄氏度, 体感%s摄氏度, %s%s级, 湿度百分之%s",
 		n.Text, n.Temp, n.FeelsLike, n.WindDir, n.WindScale, n.Humidity), nil
 }
 
@@ -348,7 +348,7 @@ func (t *WeatherTool) getForecast(ctx context.Context, locationID string, days i
 
 	var lines []string
 	for _, d := range resp.Daily {
-		lines = append(lines, fmt.Sprintf("%s: %s转%s, %s~%s°C, %s%s级",
+		lines = append(lines, fmt.Sprintf("%s: %s转%s, %s到%s摄氏度, %s%s级",
 			d.FxDate, d.TextDay, d.TextNight, d.TempMin, d.TempMax, d.WindDirDay, d.WindScaleDay))
 	}
 	return fmt.Sprintf("%d天预报:\n%s", days, joinLines(lines)), nil

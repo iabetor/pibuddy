@@ -320,10 +320,10 @@ func (t *HAGetDeviceStateTool) Execute(ctx context.Context, args json.RawMessage
 	case "climate":
 		result.WriteString(state.State)
 		if temp, ok := state.Attributes["temperature"].(float64); ok {
-			result.WriteString(fmt.Sprintf("，设定温度 %.0f°C", temp))
+			result.WriteString(fmt.Sprintf("，设定温度 %.0f摄氏度", temp))
 		}
 		if currentTemp, ok := state.Attributes["current_temperature"].(float64); ok {
-			result.WriteString(fmt.Sprintf("，当前温度 %.1f°C", currentTemp))
+			result.WriteString(fmt.Sprintf("，当前温度 %.1f摄氏度", currentTemp))
 		}
 	case "sensor":
 		unit, _ := state.Attributes["unit_of_measurement"].(string)
@@ -457,7 +457,7 @@ func (t *HAControlDeviceTool) Execute(ctx context.Context, args json.RawMessage)
 		}); err != nil {
 			return "", fmt.Errorf("操作失败: %w", err)
 		}
-		actionName = fmt.Sprintf("温度已设为 %.0f°C", a.Value)
+		actionName = fmt.Sprintf("温度已设为 %.0f摄氏度", a.Value)
 
 	default:
 		return "", fmt.Errorf("不支持的操作: %s", a.Action)

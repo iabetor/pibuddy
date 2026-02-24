@@ -82,7 +82,7 @@ func (t *SystemStatusTool) getCPUTemperature() string {
 	if data, err := os.ReadFile("/sys/class/thermal/thermal_zone0/temp"); err == nil {
 		tempStr := strings.TrimSpace(string(data))
 		if temp, err := strconv.ParseFloat(tempStr, 64); err == nil {
-			return fmt.Sprintf("%.1f°C", temp/1000)
+			return fmt.Sprintf("%.1f摄氏度", temp/1000)
 		}
 	}
 
@@ -97,7 +97,7 @@ func (t *SystemStatusTool) getCPUTemperature() string {
 						for _, sensor := range adapterMap {
 							if sensorMap, ok := sensor.(map[string]interface{}); ok {
 								if temp, ok := sensorMap["temp1_input"].(float64); ok {
-									return fmt.Sprintf("%.1f°C", temp)
+									return fmt.Sprintf("%.1f摄氏度", temp)
 								}
 							}
 						}
