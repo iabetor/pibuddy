@@ -920,7 +920,7 @@ func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
 		p.stopContinuousTimer()
 
 		logger.Infof("[pipeline] ASR 最终结果: %s", finalText)
-		p.state.Transition(StateProcessing)
+		p.state.SetState(StateProcessing)
 		go p.processQuery(ctx, finalText)
 	}
 }
