@@ -56,6 +56,11 @@ fi
 # 安装依赖
 echo ""
 echo "安装依赖..."
+# 删除旧的 package-lock.json，避免其中锁定的已过期淘宝源地址
+if [ -f "package-lock.json" ]; then
+    echo "删除旧的 package-lock.json..."
+    rm -f package-lock.json
+fi
 npm install --registry="$NPM_REGISTRY"
 
 # 配置端口
