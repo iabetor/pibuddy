@@ -42,7 +42,16 @@ llm:
   # 腾讯混元免费额度：新用户 100 万 token（共享）
   # DeepSeek：付费，作为最终兜底
   models:
-    # --- 通义千问（阿里 DashScope，快速模型优先）---
+    # --- 腾讯混元（延迟最低，优先使用）---
+    - name: "hunyuan-lite"
+      api_url: "https://api.hunyuan.cloud.tencent.com/v1"
+      api_key: "${PIBUDDY_HUNYUAN_API_KEY}"
+      model: "hunyuan-lite"
+    - name: "hunyuan-turbo"
+      api_url: "https://api.hunyuan.cloud.tencent.com/v1"
+      api_key: "${PIBUDDY_HUNYUAN_API_KEY}"
+      model: "hunyuan-turbo"
+    # --- 通义千问（阿里 DashScope，作为备选）---
     - name: "qwen-flash"
       api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
       api_key: "${PIBUDDY_QWEN_API_KEY}"
@@ -59,15 +68,6 @@ llm:
       api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
       api_key: "${PIBUDDY_QWEN_API_KEY}"
       model: "qwen-max"
-    # --- 腾讯混元 ---
-    - name: "hunyuan-lite"
-      api_url: "https://api.hunyuan.cloud.tencent.com/v1"
-      api_key: "${PIBUDDY_HUNYUAN_API_KEY}"
-      model: "hunyuan-lite"
-    - name: "hunyuan-turbo"
-      api_url: "https://api.hunyuan.cloud.tencent.com/v1"
-      api_key: "${PIBUDDY_HUNYUAN_API_KEY}"
-      model: "hunyuan-turbo"
     # --- 火山方舟（字节豆包）---
     - name: "doubao"
       api_url: "https://ark.cn-beijing.volces.com/api/v3"
