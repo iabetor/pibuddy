@@ -17,6 +17,7 @@ type Capture struct {
 	sampleRate uint32
 	channels   uint32
 	frameSize  uint32
+	micGain    float32 // 麦克风软件增益倍数
 	out        chan []float32
 	mu         sync.Mutex
 	running    bool
@@ -26,7 +27,8 @@ type Capture struct {
 // sampleRate: 采样率，语音处理通常用 16000
 // channels: 声道数，通常为 1（单声道）
 // frameSize: 每帧的采样点数（如 512）
-func NewCapture(sampleRate, channels, frameSize int) (*Capture, error) {
+// micGain: 麦克风软件增益倍数，1.0 表示无增益，2.0 表示放大 2 倍
+func NewCapture(sampleRate, channels, frameSize int, micGain float32) (*Capture, error) {
 	ctxConfig := malgo.ContextConfig{}
 	ctxConfig.ThreadPriority = malgo.ThreadPriorityRealtime
 
@@ -35,11 +37,16 @@ func NewCapture(sampleRate, channels, frameSize int) (*Capture, error) {
 		return nil, fmt.Errorf("初始化音频上下文失败: %w", err)
 	}
 
+	if micGain <= 0 {
+		micGain = 1.0
+	}
+
 	return &Capture{
 		ctx:        ctx,
 		sampleRate: uint32(sampleRate),
 		channels:   uint32(channels),
 		frameSize:  uint32(frameSize),
+		micGain:    micGain,
 		out:        make(chan []float32, 64),
 	}, nil
 }
@@ -71,6 +78,18 @@ func (c *Capture) Start() error {
 				return
 			}
 			samples := BytesToFloat32(inputSamples)
+			// 应用软件增益
+			if c.micGain != 1.0 {
+				for i := range samples {
+					samples[i] *= c.micGain
+					// 限制在 [-1, 1] 范围内，防止爆音
+					if samples[i] > 1.0 {
+						samples[i] = 1.0
+					} else if samples[i] < -1.0 {
+						samples[i] = -1.0
+					}
+				}
+			}
 			// 非阻塞发送 —— 如果消费端跟不上就丢帧
 			select {
 			case c.out <- samples:

@@ -54,9 +54,10 @@ type VoiceprintConfig struct {
 
 // AudioConfig 音频采集/播放配置。
 type AudioConfig struct {
-	SampleRate int `yaml:"sample_rate"`
-	Channels   int `yaml:"channels"`
-	FrameSize  int `yaml:"frame_size"`
+	SampleRate int     `yaml:"sample_rate"`
+	Channels   int     `yaml:"channels"`
+	FrameSize  int     `yaml:"frame_size"`
+	MicGain    float32 `yaml:"mic_gain"` // 麦克风软件增益倍数，默认 1.0
 }
 
 // WakeConfig 唤醒词检测配置。

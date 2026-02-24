@@ -101,7 +101,7 @@ func cmdRegister(mgr *voiceprint.Manager, cfg *config.Config, name string) {
 	const numSamples = 5
 	const sampleDuration = 4 * time.Second
 
-	capture, err := audio.NewCapture(cfg.Audio.SampleRate, cfg.Audio.Channels, cfg.Audio.FrameSize)
+	capture, err := audio.NewCapture(cfg.Audio.SampleRate, cfg.Audio.Channels, cfg.Audio.FrameSize, cfg.Audio.MicGain)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "初始化麦克风失败: %v\n", err)
 		os.Exit(1)

@@ -131,7 +131,7 @@ func New(cfg *config.Config) (*Pipeline, error) {
 	}
 
 	// 音频采集（16kHz 单声道）
-	p.capture, err = audio.NewCapture(cfg.Audio.SampleRate, cfg.Audio.Channels, cfg.Audio.FrameSize)
+	p.capture, err = audio.NewCapture(cfg.Audio.SampleRate, cfg.Audio.Channels, cfg.Audio.FrameSize, cfg.Audio.MicGain)
 	if err != nil {
 		return nil, fmt.Errorf("初始化音频采集失败: %w", err)
 	}

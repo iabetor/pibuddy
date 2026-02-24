@@ -2,6 +2,7 @@ audio:
   sample_rate: 16000
   channels: 1
   frame_size: 512
+  mic_gain: 2.0  # 麦克风软件增益倍数，1.0 无增益，2.0 放大 2 倍（适合不灵敏的麦克风）
 
 wake:
   model_path: "./models/kws"
