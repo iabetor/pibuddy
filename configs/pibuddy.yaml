@@ -43,14 +43,14 @@ llm:
   # DeepSeek：付费，作为最终兜底
   models:
     # --- 通义千问（阿里 DashScope，快速模型优先）---
-    - name: "qwen-turbo"
-      api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-      api_key: "${PIBUDDY_QWEN_API_KEY}"
-      model: "qwen-turbo"
     - name: "qwen-flash"
       api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
       api_key: "${PIBUDDY_QWEN_API_KEY}"
       model: "qwen-flash"
+    - name: "qwen-turbo"
+      api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      api_key: "${PIBUDDY_QWEN_API_KEY}"
+      model: "qwen-turbo"
     - name: "qwen-plus"
       api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
       api_key: "${PIBUDDY_QWEN_API_KEY}"

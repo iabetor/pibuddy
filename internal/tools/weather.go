@@ -348,8 +348,9 @@ func (t *WeatherTool) getForecast(ctx context.Context, locationID string, days i
 
 	var lines []string
 	for _, d := range resp.Daily {
+		dateStr := formatDate(d.FxDate)
 		lines = append(lines, fmt.Sprintf("%s: %s转%s, %s到%s摄氏度, %s%s级",
-			d.FxDate, d.TextDay, d.TextNight, d.TempMin, d.TempMax, d.WindDirDay, d.WindScaleDay))
+			dateStr, d.TextDay, d.TextNight, d.TempMin, d.TempMax, d.WindDirDay, d.WindScaleDay))
 	}
 	return fmt.Sprintf("%d天预报:\n%s", days, joinLines(lines)), nil
 }
@@ -363,6 +364,23 @@ func joinLines(lines []string) string {
 		result += l
 	}
 	return result
+}
+
+// formatDate 将 "2026-03-01" 格式化为 "3月1日"
+func formatDate(dateStr string) string {
+	parts := strings.Split(dateStr, "-")
+	if len(parts) != 3 {
+		return dateStr
+	}
+	month := strings.TrimLeft(parts[1], "0")
+	day := strings.TrimLeft(parts[2], "0")
+	if month == "" {
+		month = "0"
+	}
+	if day == "" {
+		day = "0"
+	}
+	return fmt.Sprintf("%s月%s日", month, day)
 }
 
 // geoHost 返回 Geo API 的 host。

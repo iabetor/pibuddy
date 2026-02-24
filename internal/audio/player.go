@@ -47,6 +47,13 @@ func (p *Player) Play(ctx context.Context, samples []float32, sampleRate int) er
 	}
 	p.mu.Unlock()
 
+	// 添加静音前导缓冲（解决蓝牙音箱首字丢失问题）
+	// 蓝牙设备建立音频流需要时间，开头几百毫秒可能被截断
+	const silenceDurationMs = 300
+	silenceSamples := sampleRate * silenceDurationMs / 1000
+	silence := make([]float32, silenceSamples)
+	samples = append(silence, samples...)
+
 	pcmBytes := Float32ToBytes(samples)
 	pos := 0
 	done := make(chan struct{})
