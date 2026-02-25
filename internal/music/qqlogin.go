@@ -305,6 +305,9 @@ func CompleteQQMusicLogin(redirectURL string) (*QRLoginResult, error) {
 		qqMusicPt3rdAid, url.QueryEscape(redirectURI), gtk,
 	)
 
+	logger.Debugf("[qqmusic] OAuth 授权 URL: %s", authorizeURL)
+	logger.Debugf("[qqmusic] g_tk=%d, p_skey=%s...", gtk, pSkey[:min(len(pSkey), 10)])
+
 	// 手动构建请求，带 cookie
 	req, err := http.NewRequest("GET", authorizeURL, nil)
 	if err != nil {
@@ -332,14 +335,18 @@ func CompleteQQMusicLogin(redirectURL string) (*QRLoginResult, error) {
 	}
 	defer resp.Body.Close()
 
+	logger.Debugf("[qqmusic] OAuth 授权响应: status=%d", resp.StatusCode)
+
 	// 收集响应 cookie
 	for _, c := range resp.Cookies() {
 		allCookies[c.Name] = c
+		logger.Debugf("[qqmusic] OAuth 响应 cookie: %s=%s...", c.Name, c.Value[:min(len(c.Value), 20)])
 	}
 
 	// 从 Location 头提取 code
 	var code string
 	if loc := resp.Header.Get("Location"); loc != "" {
+		logger.Debugf("[qqmusic] OAuth 重定向: %s", loc)
 		if u, err := url.Parse(loc); err == nil {
 			code = u.Query().Get("code")
 		}
@@ -351,11 +358,14 @@ func CompleteQQMusicLogin(redirectURL string) (*QRLoginResult, error) {
 			}
 			resp2.Body.Close()
 		}
+	} else {
+		logger.Debugf("[qqmusic] OAuth 无 Location 头")
 	}
 
 	// 如果没有 code，尝试从响应体解析
 	if code == "" {
 		body, _ := io.ReadAll(resp.Body)
+		logger.Debugf("[qqmusic] OAuth 响应体 (前500字节): %s", string(body[:min(len(body), 500)]))
 		// 尝试 JSONP 格式: callback({"code":"xxx"})
 		re := regexp.MustCompile(`"code"\s*:\s*"([^"]+)"`)
 		if matches := re.FindStringSubmatch(string(body)); len(matches) > 1 {
@@ -370,14 +380,23 @@ func CompleteQQMusicLogin(redirectURL string) (*QRLoginResult, error) {
 		}
 	}
 
+	logger.Debugf("[qqmusic] OAuth code: %q", code)
+
 	// 第三步：用 code 换取 QQ 音乐 token
 	if code != "" {
+		logger.Debugf("[qqmusic] 开始用 code 换取 musickey...")
 		musicCookies, err := exchangeQQMusicToken(client2, code, gtk, allCookies)
-		if err == nil && len(musicCookies) > 0 {
+		if err != nil {
+			logger.Debugf("[qqmusic] exchangeToken 失败: %v", err)
+		} else {
+			logger.Debugf("[qqmusic] exchangeToken 返回 %d 个 cookie", len(musicCookies))
 			for _, c := range musicCookies {
+				logger.Debugf("[qqmusic] exchangeToken cookie: %s=%s...", c.Name, c.Value[:min(len(c.Value), 20)])
 				allCookies[c.Name] = c
 			}
 		}
+	} else {
+		logger.Debugf("[qqmusic] 未获取到 OAuth code，跳过 exchangeToken")
 	}
 
 	// 最后再收集一次所有域名的 cookie
