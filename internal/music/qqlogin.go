@@ -394,6 +394,7 @@ func CompleteQQMusicLogin(redirectURL string) (*QRLoginResult, error) {
 }
 
 // exchangeQQMusicToken 使用 OAuth code 换取 QQ 音乐 token。
+// QQ 音乐 musicu.fcg 返回的 musickey/musicid 在 JSON body 里，不在 Set-Cookie 中。
 func exchangeQQMusicToken(client *http.Client, code string, gtk int, existingCookies map[string]*http.Cookie) ([]*http.Cookie, error) {
 	payload := map[string]interface{}{
 		"comm": map[string]interface{}{
@@ -429,7 +430,63 @@ func exchangeQQMusicToken(client *http.Client, code string, gtk int, existingCoo
 	}
 	defer resp.Body.Close()
 
-	return resp.Cookies(), nil
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取 musicu.fcg 响应失败: %w", err)
+	}
+
+	// 解析 JSON body，提取 musickey 和 musicid
+	// 响应格式: {"code":0,"req":{"code":0,"data":{"musicid":123456,"musickey":"xxx",...}}}
+	var result struct {
+		Code int `json:"code"`
+		Req  struct {
+			Code int `json:"code"`
+			Data struct {
+				Musicid  json.Number `json:"musicid"`
+				Musickey string      `json:"musickey"`
+			} `json:"data"`
+		} `json:"req"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		logger.Debugf("[qqmusic] exchangeToken 解析响应失败: %v, body: %s", err, string(body[:min(len(body), 500)]))
+		return resp.Cookies(), nil
+	}
+
+	logger.Debugf("[qqmusic] exchangeToken 结果: code=%d, req.code=%d, musicid=%s, musickey长度=%d",
+		result.Code, result.Req.Code, result.Req.Data.Musicid, len(result.Req.Data.Musickey))
+
+	var cookies []*http.Cookie
+
+	// 先收集 HTTP Set-Cookie 头中的 cookie
+	cookies = append(cookies, resp.Cookies()...)
+
+	if result.Req.Data.Musickey != "" {
+		musickey := result.Req.Data.Musickey
+		musicid := result.Req.Data.Musicid.String()
+
+		// 构造 QQ 音乐需要的关键 cookie
+		cookies = append(cookies,
+			&http.Cookie{Name: "qqmusic_key", Value: musickey},
+			&http.Cookie{Name: "qm_keyst", Value: musickey},
+		)
+		if musicid != "" && musicid != "0" {
+			cookies = append(cookies, &http.Cookie{Name: "uin", Value: musicid})
+		}
+
+		logger.Debugf("[qqmusic] 成功获取 QQ 音乐 token: musicid=%s", musicid)
+	} else {
+		logger.Debugf("[qqmusic] exchangeToken 未返回 musickey, 完整响应: %s", string(body[:min(len(body), 1000)]))
+	}
+
+	return cookies, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func buildLoginResult(cookies map[string]*http.Cookie, fallbackUIN ...string) (*QRLoginResult, error) {
@@ -508,11 +565,26 @@ func SetQQMusicAPICookie(apiURL string, cookies []http.Cookie) error {
 		cookieMap[c.Name] = c.Value
 	}
 
-	// p_uin -> uin（去掉 "o" 前缀，QQMusicApi setCookie 内部会 replace(/\D/g, '')）
+	// 确保 uin 是纯数字且不带前导 0（匹配 QQMusicApi config 中的 QQ 号）
+	cleanUIN := func(raw string) string {
+		// 去掉非数字字符（如 "o" 前缀）
+		digits := strings.Map(func(r rune) rune {
+			if r >= '0' && r <= '9' {
+				return r
+			}
+			return -1
+		}, raw)
+		// 去掉前导 0
+		digits = strings.TrimLeft(digits, "0")
+		return digits
+	}
+
 	if _, ok := cookieMap["uin"]; !ok {
 		if puin, ok := cookieMap["p_uin"]; ok {
-			cookieMap["uin"] = puin
+			cookieMap["uin"] = cleanUIN(puin)
 		}
+	} else {
+		cookieMap["uin"] = cleanUIN(cookieMap["uin"])
 	}
 
 	// p_skey -> qqmusic_key（QQMusicApi song/url 接口用 qqmusic_key 作为 authst）
