@@ -195,18 +195,6 @@ func CompleteQQMusicLogin(redirectURL string) (*QRLoginResult, error) {
 		return nil, fmt.Errorf("创建 cookie jar 失败: %w", err)
 	}
 
-	client := &http.Client{
-		Jar:     jar,
-		Timeout: 30 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// 允许自动跟随重定向，但限制次数
-			if len(via) >= 15 {
-				return fmt.Errorf("重定向次数过多")
-			}
-			return nil
-		},
-	}
-
 	// 第一步：访问 redirectURL，完成登录跳转，获取基础 cookie
 	// 使用不自动跟随的 client 手动跟踪，以收集所有中间 cookie 和 uin
 	noRedirectClient := &http.Client{
@@ -300,28 +288,17 @@ func CompleteQQMusicLogin(redirectURL string) (*QRLoginResult, error) {
 	// 第二步：OAuth 授权，获取 code
 	gtk := gTk(pSkey)
 	redirectURI := "https://y.qq.com/portal/wx_redirect.html?login_type=1&surl=https://y.qq.com/"
-	authorizeURL := fmt.Sprintf(
-		"https://graph.qq.com/oauth2.0/authorize?response_type=code&client_id=%s&redirect_uri=%s&scope=all&state=&g_tk=%d",
-		qqMusicPt3rdAid, url.QueryEscape(redirectURI), gtk,
-	)
 
-	logger.Debugf("[qqmusic] OAuth 授权 URL: %s", authorizeURL)
 	logger.Debugf("[qqmusic] g_tk=%d, p_skey=%s...", gtk, pSkey[:min(len(pSkey), 10)])
 
-	// 手动构建请求，带 cookie
-	req, err := http.NewRequest("GET", authorizeURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("创建授权请求失败: %w", err)
-	}
-	req.Header.Set("Referer", "https://y.qq.com/")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
-	// 手动附加 cookie（跨域时 jar 可能不会自动附加）
+	// 构建 cookie 字符串（手动附加，确保跨域传递）
+	var cookieParts []string
 	for _, c := range allCookies {
-		req.AddCookie(c)
+		cookieParts = append(cookieParts, c.Name+"="+c.Value)
 	}
+	cookieHeader := strings.Join(cookieParts, "; ")
 
-	// 不自动跟随，获取 code
+	// 不自动跟随重定向的 client（用于手动跟踪 302）
 	client2 := &http.Client{
 		Jar:     jar,
 		Timeout: 30 * time.Second,
@@ -329,53 +306,128 @@ func CompleteQQMusicLogin(redirectURL string) (*QRLoginResult, error) {
 			return http.ErrUseLastResponse
 		},
 	}
+
+	var code string
+
+	// 方式1: POST 方式自动授权（模拟用户点击"授权并登录"按钮）
+	authorizeURL := "https://graph.qq.com/oauth2.0/authorize"
+	formData := url.Values{
+		"response_type": {"code"},
+		"client_id":     {qqMusicPt3rdAid},
+		"redirect_uri":  {redirectURI},
+		"scope":         {"all"},
+		"state":         {""},
+		"switch":        {""},
+		"from_ptlogin":  {"1"},
+		"src":           {"1"},
+		"update_auth":   {"1"},
+		"openapi":       {"80901010"},
+		"g_tk":          {fmt.Sprintf("%d", gtk)},
+		"auth_time":     {fmt.Sprintf("%d", time.Now().Unix())},
+		"ui":            {url.QueryEscape("33E01CD5-AF59-4E2D-B8A1-3D8B041B5F97")},
+	}
+	logger.Debugf("[qqmusic] OAuth POST 授权: %s", authorizeURL)
+
+	req, err := http.NewRequest("POST", authorizeURL, strings.NewReader(formData.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("创建授权请求失败: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Referer", "https://graph.qq.com/oauth2.0/show?which=Login&display=pc&response_type=code&client_id="+qqMusicPt3rdAid)
+	req.Header.Set("Origin", "https://graph.qq.com")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Cookie", cookieHeader)
+
 	resp, err := client2.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("OAuth 授权请求失败: %w", err)
 	}
-	defer resp.Body.Close()
 
-	logger.Debugf("[qqmusic] OAuth 授权响应: status=%d", resp.StatusCode)
+	logger.Debugf("[qqmusic] OAuth POST 响应: status=%d", resp.StatusCode)
 
 	// 收集响应 cookie
 	for _, c := range resp.Cookies() {
 		allCookies[c.Name] = c
-		logger.Debugf("[qqmusic] OAuth 响应 cookie: %s=%s...", c.Name, c.Value[:min(len(c.Value), 20)])
 	}
 
-	// 从 Location 头提取 code
-	var code string
-	if loc := resp.Header.Get("Location"); loc != "" {
-		logger.Debugf("[qqmusic] OAuth 重定向: %s", loc)
-		if u, err := url.Parse(loc); err == nil {
-			code = u.Query().Get("code")
-		}
-		// 跟随重定向收集更多 cookie
-		resp2, err := client.Get(loc)
-		if err == nil {
-			for _, c := range resp2.Cookies() {
-				allCookies[c.Name] = c
+	// 从重定向链中提取 code
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		loc := resp.Header.Get("Location")
+		resp.Body.Close()
+		logger.Debugf("[qqmusic] OAuth POST 重定向: %s", loc)
+
+		// 跟随重定向链，直到找到 code
+		for i := 0; i < 10 && loc != "" && code == ""; i++ {
+			if u, parseErr := url.Parse(loc); parseErr == nil {
+				if c := u.Query().Get("code"); c != "" {
+					code = c
+					break
+				}
 			}
-			resp2.Body.Close()
+			followReq, _ := http.NewRequest("GET", loc, nil)
+			if followReq != nil {
+				followReq.Header.Set("Cookie", cookieHeader)
+				followReq.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+				followResp, followErr := client2.Do(followReq)
+				if followErr != nil {
+					break
+				}
+				for _, c := range followResp.Cookies() {
+					allCookies[c.Name] = c
+				}
+				loc = followResp.Header.Get("Location")
+				logger.Debugf("[qqmusic] OAuth 跟随重定向 #%d: status=%d, location=%s", i+1, followResp.StatusCode, loc)
+				followResp.Body.Close()
+				if followResp.StatusCode < 300 || followResp.StatusCode >= 400 {
+					break
+				}
+			} else {
+				break
+			}
 		}
 	} else {
-		logger.Debugf("[qqmusic] OAuth 无 Location 头")
-	}
-
-	// 如果没有 code，尝试从响应体解析
-	if code == "" {
+		// 非重定向，尝试从响应体提取 code
 		body, _ := io.ReadAll(resp.Body)
-		logger.Debugf("[qqmusic] OAuth 响应体 (前500字节): %s", string(body[:min(len(body), 500)]))
-		// 尝试 JSONP 格式: callback({"code":"xxx"})
-		re := regexp.MustCompile(`"code"\s*:\s*"([^"]+)"`)
+		resp.Body.Close()
+		logger.Debugf("[qqmusic] OAuth POST 响应体 (前500字节): %s", string(body[:min(len(body), 500)]))
+		re := regexp.MustCompile(`code=([A-Za-z0-9_-]+)`)
 		if matches := re.FindStringSubmatch(string(body)); len(matches) > 1 {
 			code = matches[1]
 		}
-		// 尝试 URL 格式: code=xxx
-		if code == "" {
-			re = regexp.MustCompile(`code=([A-Za-z0-9_-]+)`)
-			if matches := re.FindStringSubmatch(string(body)); len(matches) > 1 {
-				code = matches[1]
+	}
+
+	// 方式2: 如果 POST 失败，尝试 GET 方式（某些情况下已授权的应用会直接返回 code）
+	if code == "" {
+		getURL := fmt.Sprintf(
+			"https://graph.qq.com/oauth2.0/authorize?response_type=code&client_id=%s&redirect_uri=%s&scope=all&state=&g_tk=%d&from_ptlogin=1&src=1&update_auth=1",
+			qqMusicPt3rdAid, url.QueryEscape(redirectURI), gtk,
+		)
+		logger.Debugf("[qqmusic] OAuth GET 尝试: %s", getURL)
+
+		getReq, _ := http.NewRequest("GET", getURL, nil)
+		if getReq != nil {
+			getReq.Header.Set("Cookie", cookieHeader)
+			getReq.Header.Set("Referer", "https://y.qq.com/")
+			getReq.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+			getResp, getErr := client2.Do(getReq)
+			if getErr == nil {
+				logger.Debugf("[qqmusic] OAuth GET 响应: status=%d", getResp.StatusCode)
+				if getResp.StatusCode >= 300 && getResp.StatusCode < 400 {
+					loc := getResp.Header.Get("Location")
+					logger.Debugf("[qqmusic] OAuth GET 重定向: %s", loc)
+					if u, parseErr := url.Parse(loc); parseErr == nil {
+						code = u.Query().Get("code")
+					}
+				}
+				if code == "" {
+					body, _ := io.ReadAll(getResp.Body)
+					logger.Debugf("[qqmusic] OAuth GET 响应体 (前500字节): %s", string(body[:min(len(body), 500)]))
+					re := regexp.MustCompile(`code=([A-Za-z0-9_-]+)`)
+					if matches := re.FindStringSubmatch(string(body)); len(matches) > 1 {
+						code = matches[1]
+					}
+				}
+				getResp.Body.Close()
 			}
 		}
 	}
