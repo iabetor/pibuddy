@@ -443,9 +443,8 @@ func buildLoginResult(cookies map[string]*http.Cookie, fallbackUIN ...string) (*
 			Name:  c.Name,
 			Value: c.Value,
 		})
-		// QQ 号可能在不同 cookie 字段中：uin, ptui_loginuin, pt2gguin
-		if c.Name == "uin" || c.Name == "ptui_loginuin" || c.Name == "pt2gguin" {
-			// 清理 uin 前缀的 "o" 字符和前导零
+		// QQ 号可能在不同 cookie 字段中：uin, p_uin, ptui_loginuin, pt2gguin
+		if c.Name == "uin" || c.Name == "p_uin" || c.Name == "ptui_loginuin" || c.Name == "pt2gguin" {
 			uin := strings.TrimLeft(c.Value, "o")
 			uin = strings.TrimLeft(uin, "0")
 			if uin != "" && result.UIN == "" {
@@ -459,14 +458,80 @@ func buildLoginResult(cookies map[string]*http.Cookie, fallbackUIN ...string) (*
 		result.UIN = fallbackUIN[0]
 	}
 
+	// 补充关键 Cookie：QQMusicApi 需要 uin、qqmusic_key、qm_keyst
+	// QQ OAuth 扫码登录可能只拿到 p_uin 和 p_skey，需要映射
+	hasCookie := func(name string) bool {
+		for _, c := range result.Cookies {
+			if c.Name == name && c.Value != "" {
+				return true
+			}
+		}
+		return false
+	}
+	getCookie := func(name string) string {
+		for _, c := range result.Cookies {
+			if c.Name == name {
+				return c.Value
+			}
+		}
+		return ""
+	}
+
+	// p_uin -> uin
+	if !hasCookie("uin") {
+		if v := getCookie("p_uin"); v != "" {
+			result.Cookies = append(result.Cookies, http.Cookie{Name: "uin", Value: v})
+		}
+	}
+	// p_skey -> qqmusic_key
+	if !hasCookie("qqmusic_key") {
+		if v := getCookie("p_skey"); v != "" {
+			result.Cookies = append(result.Cookies, http.Cookie{Name: "qqmusic_key", Value: v})
+		}
+	}
+	// p_skey -> qm_keyst
+	if !hasCookie("qm_keyst") {
+		if v := getCookie("p_skey"); v != "" {
+			result.Cookies = append(result.Cookies, http.Cookie{Name: "qm_keyst", Value: v})
+		}
+	}
+
 	return &result, nil
 }
 
 // SetQQMusicAPICookie 将 cookie 同步到 QQMusicApi 服务。
+// QQMusicApi 的 /user/setCookie 接口需要 uin 和 qqmusic_key 字段，
+// 但 QQ OAuth 扫码登录拿到的是 p_uin 和 p_skey，需要做映射。
 func SetQQMusicAPICookie(apiURL string, cookies []http.Cookie) error {
-	var parts []string
+	cookieMap := make(map[string]string)
 	for _, c := range cookies {
-		parts = append(parts, c.Name+"="+c.Value)
+		cookieMap[c.Name] = c.Value
+	}
+
+	// p_uin -> uin（去掉 "o" 前缀，QQMusicApi setCookie 内部会 replace(/\D/g, '')）
+	if _, ok := cookieMap["uin"]; !ok {
+		if puin, ok := cookieMap["p_uin"]; ok {
+			cookieMap["uin"] = puin
+		}
+	}
+
+	// p_skey -> qqmusic_key（QQMusicApi song/url 接口用 qqmusic_key 作为 authst）
+	if _, ok := cookieMap["qqmusic_key"]; !ok {
+		if pskey, ok := cookieMap["p_skey"]; ok {
+			cookieMap["qqmusic_key"] = pskey
+		}
+	}
+
+	// 同时设置 qm_keyst（部分接口用这个字段）
+	if _, ok := cookieMap["qm_keyst"]; !ok {
+		if pskey, ok := cookieMap["p_skey"]; ok {
+			cookieMap["qm_keyst"] = pskey
+		}
+	}
+
+	var parts []string
+	for k, v := range cookieMap {
+		parts = append(parts, k+"="+v)
 	}
 	cookieStr := strings.Join(parts, "; ")
 
