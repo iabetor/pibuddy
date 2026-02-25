@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/iabetor/pibuddy/internal/logger"
 	"github.com/iabetor/pibuddy/internal/music"
 )
 
@@ -30,6 +31,14 @@ func main() {
 
 	// 解析 provider 和 command
 	provider, command, opts := parseArgs()
+
+	// 初始化日志
+	logLevel := "info"
+	if opts.verbose {
+		logLevel = "debug"
+	}
+	logger.Init(logger.Config{Level: logLevel})
+	defer logger.Sync()
 
 	dataDir := getDataDir()
 	apiURL := getAPIURL(provider)
@@ -65,6 +74,7 @@ type cmdOptions struct {
 	webMode bool
 	port    string
 	cookie  string
+	verbose bool
 }
 
 func parseArgs() (string, string, cmdOptions) {
@@ -80,6 +90,8 @@ func parseArgs() (string, string, cmdOptions) {
 		switch os.Args[i] {
 		case "--web":
 			opts.webMode = true
+		case "-v", "--verbose":
+			opts.verbose = true
 		case "--port":
 			if i+1 < len(os.Args) {
 				i++
