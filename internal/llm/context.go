@@ -113,19 +113,32 @@ func (cm *ContextManager) Messages() []Message {
 	// 清理末尾的孤立 tool 消息（没有对应 assistant 回复的）
 	// 这在工具调用被打断时可能发生
 	messages := cm.messages
-	for len(messages) > 0 && messages[len(messages)-1].Role == "tool" {
-		// 移除末尾的 tool 消息，以及对应的 assistant 消息（如果包含 tool_calls）
-		// 需要找到包含这个 tool_call_id 的 assistant 消息
-		toolCallID := messages[len(messages)-1].ToolCallID
-		messages = messages[:len(messages)-1]
 
-		// 同时移除包含该 tool_call 的 assistant 消息
-		if toolCallID != "" && len(messages) > 0 && messages[len(messages)-1].Role == "assistant" {
-			for _, tc := range messages[len(messages)-1].ToolCalls {
-				if tc.ID == toolCallID {
-					messages = messages[:len(messages)-1]
+	// 收集末尾所有连续的 tool 消息的 tool_call_id
+	trailingToolCallIDs := make(map[string]bool)
+	for len(messages) > 0 && messages[len(messages)-1].Role == "tool" {
+		tcID := messages[len(messages)-1].ToolCallID
+		if tcID != "" {
+			trailingToolCallIDs[tcID] = true
+		}
+		messages = messages[:len(messages)-1]
+	}
+
+	// 如果有孤立的 tool 消息，找到并移除包含这些 tool_call 的 assistant 消息
+	if len(trailingToolCallIDs) > 0 && len(messages) > 0 && messages[len(messages)-1].Role == "assistant" {
+		// 检查 assistant 消息是否包含这些 tool_call_id
+		assistantMsg := messages[len(messages)-1]
+		if len(assistantMsg.ToolCalls) > 0 {
+			// 检查是否所有 tool_calls 都在孤立列表中
+			allOrphaned := true
+			for _, tc := range assistantMsg.ToolCalls {
+				if !trailingToolCallIDs[tc.ID] {
+					allOrphaned = false
 					break
 				}
+			}
+			if allOrphaned {
+				messages = messages[:len(messages)-1]
 			}
 		}
 	}
