@@ -346,9 +346,12 @@ func (t *WeatherTool) getForecast(ctx context.Context, locationID string, days i
 		return "", fmt.Errorf("预报API错误 code=%s", resp.Code)
 	}
 
+	// 获取今天日期用于计算相对时间
+	today := time.Now().Format("2006-01-02")
+
 	var lines []string
-	for _, d := range resp.Daily {
-		dateStr := formatDate(d.FxDate)
+	for i, d := range resp.Daily {
+		dateStr := formatDateWithRelative(d.FxDate, today, i)
 		lines = append(lines, fmt.Sprintf("%s: %s转%s, %s到%s摄氏度, %s%s级",
 			dateStr, d.TextDay, d.TextNight, d.TempMin, d.TempMax, d.WindDirDay, d.WindScaleDay))
 	}
@@ -381,6 +384,45 @@ func formatDate(dateStr string) string {
 		day = "0"
 	}
 	return fmt.Sprintf("%s月%s日", month, day)
+}
+
+// formatDateWithRelative 将日期格式化为带相对时间的格式，如 "今天(3月7日星期六)"
+func formatDateWithRelative(dateStr, today string, index int) string {
+	parts := strings.Split(dateStr, "-")
+	if len(parts) != 3 {
+		return dateStr
+	}
+	month := strings.TrimLeft(parts[1], "0")
+	day := strings.TrimLeft(parts[2], "0")
+	if month == "" {
+		month = "0"
+	}
+	if day == "" {
+		day = "0"
+	}
+
+	// 解析日期获取星期
+	t, err := time.Parse("2006-01-02", dateStr)
+	if err != nil {
+		return fmt.Sprintf("%s月%s日", month, day)
+	}
+	weekdays := []string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}
+	weekday := weekdays[t.Weekday()]
+
+	// 添加相对时间标签
+	var relative string
+	if dateStr == today {
+		relative = "今天"
+	} else if index == 1 {
+		relative = "明天"
+	} else if index == 2 {
+		relative = "后天"
+	}
+
+	if relative != "" {
+		return fmt.Sprintf("%s(%s月%s日%s)", relative, month, day, weekday)
+	}
+	return fmt.Sprintf("%s月%s日%s", month, day, weekday)
 }
 
 // geoHost 返回 Geo API 的 host。
