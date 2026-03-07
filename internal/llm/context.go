@@ -110,12 +110,32 @@ func (cm *ContextManager) Messages() []Message {
 		}
 	}
 
-	msgs := make([]Message, 0, 1+len(cm.messages))
+	// 清理末尾的孤立 tool 消息（没有对应 assistant 回复的）
+	// 这在工具调用被打断时可能发生
+	messages := cm.messages
+	for len(messages) > 0 && messages[len(messages)-1].Role == "tool" {
+		// 移除末尾的 tool 消息，以及对应的 assistant 消息（如果包含 tool_calls）
+		// 需要找到包含这个 tool_call_id 的 assistant 消息
+		toolCallID := messages[len(messages)-1].ToolCallID
+		messages = messages[:len(messages)-1]
+
+		// 同时移除包含该 tool_call 的 assistant 消息
+		if toolCallID != "" && len(messages) > 0 && messages[len(messages)-1].Role == "assistant" {
+			for _, tc := range messages[len(messages)-1].ToolCalls {
+				if tc.ID == toolCallID {
+					messages = messages[:len(messages)-1]
+					break
+				}
+			}
+		}
+	}
+
+	msgs := make([]Message, 0, 1+len(messages))
 	msgs = append(msgs, Message{
 		Role:    "system",
 		Content: cm.systemPrompt + timeInfo + userInfo,
 	})
-	msgs = append(msgs, cm.messages...)
+	msgs = append(msgs, messages...)
 	return msgs
 }
 
