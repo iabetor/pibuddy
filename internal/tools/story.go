@@ -50,12 +50,13 @@ func (t *TellStoryTool) Name() string {
 
 // Description 返回工具描述
 func (t *TellStoryTool) Description() string {
-	return `讲一个故事。可以指定故事类型或关键词。
+	return `播放/朗读一个故事。当用户想听故事时使用此工具。
 示例：
 - "讲个故事" - 随机讲一个故事
 - "讲个童话故事" - 讲童话故事
 - "讲个小马过河的故事" - 讲指定标题的故事
-- "讲个关于勇气的故事" - 根据主题找故事`
+- "奥特曼的故事你会讲吗" - 讲奥特曼相关的故事
+注意：这是播放故事给用户听，不是保存故事！`
 }
 
 // Parameters 返回参数定义
@@ -159,7 +160,8 @@ func (t *SaveStoryTool) Name() string {
 
 // Description 返回工具描述
 func (t *SaveStoryTool) Description() string {
-	return "保存一个故事到故事库。当用户说\"保存这个故事\"或\"记住这个故事\"时使用。"
+	return `保存一个已存在的故事到故事库。仅当用户明确要求"保存这个故事"或"记住这个故事"时使用。
+注意：这个工具不会讲故事！讲故事请使用 tell_story 工具。`
 }
 
 // Parameters 返回参数定义

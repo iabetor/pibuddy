@@ -864,6 +864,11 @@ func (p *Pipeline) playWakeReply(ctx context.Context) {
 
 // handleListening 同时将音频送入 VAD 和 ASR。
 func (p *Pipeline) handleListening(ctx context.Context, frame []float32) {
+	// 检查状态是否还在监听（防止 Cancel() 后竞态访问）
+	if p.state.Current() != StateListening {
+		return
+	}
+
 	// 检查是否在静默期内（打断后的回声消散期）
 	p.echoSilenceMu.Lock()
 	silenceUntil := p.echoSilenceUntil
@@ -1051,6 +1056,12 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 		preamble := strings.TrimSpace(fullReply.String())
 		if preamble != "" {
 			logger.Debugf("[pipeline] 检测到工具调用，丢弃前言文本: %s", preamble)
+		}
+
+		// 播放工具等待提示
+		if p.cfg.Dialog.ToolReply != "" {
+			p.state.Transition(StateSpeaking)
+			p.speakText(queryCtx, p.cfg.Dialog.ToolReply)
 		}
 
 		// 切回 Processing，执行工具

@@ -219,6 +219,37 @@ type qweatherForecastResp struct {
 	} `json:"daily"`
 }
 
+// WeatherResult 天气查询结果，返回结构化数据让 LLM 组织语言
+type WeatherResult struct {
+	City      string        `json:"city"`
+	Now       *NowWeather   `json:"now,omitempty"`
+	Forecast  []DayForecast `json:"forecast,omitempty"`
+	ForecastDays int        `json:"forecast_days,omitempty"`
+}
+
+// NowWeather 实时天气
+type NowWeather struct {
+	Text      string `json:"text"`       // 天气现象
+	Temp      string `json:"temp"`       // 温度
+	FeelsLike string `json:"feels_like"` // 体感温度
+	WindDir   string `json:"wind_dir"`   // 风向
+	WindScale string `json:"wind_scale"` // 风力等级
+	Humidity  string `json:"humidity"`   // 湿度
+}
+
+// DayForecast 日预报
+type DayForecast struct {
+	Date       string `json:"date"`        // 日期
+	Weekday    string `json:"weekday"`     // 星期
+	Relative   string `json:"relative"`    // 相对时间（今天/明天/后天）
+	TextDay    string `json:"text_day"`    // 白天天气
+	TextNight  string `json:"text_night"`  // 夜间天气
+	TempMax    string `json:"temp_max"`    // 最高温度
+	TempMin    string `json:"temp_min"`    // 最低温度
+	WindDir    string `json:"wind_dir"`    // 风向
+	WindScale  string `json:"wind_scale"`  // 风力等级
+}
+
 func (t *WeatherTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a weatherArgs
 	if err := json.Unmarshal(args, &a); err != nil {
@@ -242,11 +273,11 @@ func (t *WeatherTool) Execute(ctx context.Context, args json.RawMessage) (string
 
 	// 2. 并行查询实时天气和预报
 	type nowResult struct {
-		data string
+		data *NowWeather
 		err  error
 	}
 	type forecastResult struct {
-		data string
+		data []DayForecast
 		err  error
 	}
 
@@ -254,11 +285,11 @@ func (t *WeatherTool) Execute(ctx context.Context, args json.RawMessage) (string
 	fcCh := make(chan forecastResult, 1)
 
 	go func() {
-		data, err := t.getNow(ctx, city.ID)
+		data, err := t.getNowData(ctx, city.ID)
 		nowCh <- nowResult{data, err}
 	}()
 	go func() {
-		data, err := t.getForecast(ctx, city.ID, days)
+		data, err := t.getForecastData(ctx, city.ID, days)
 		fcCh <- forecastResult{data, err}
 	}()
 
@@ -272,7 +303,19 @@ func (t *WeatherTool) Execute(ctx context.Context, args json.RawMessage) (string
 		return "", fr.err
 	}
 
-	return fmt.Sprintf("%s天气:\n%s\n%s", city.Name, nr.data, fr.data), nil
+	// 返回结构化 JSON，让 LLM 组织自然语言
+	result := WeatherResult{
+		City:         city.Name,
+		Now:          nr.data,
+		Forecast:     fr.data,
+		ForecastDays: days,
+	}
+
+	jsonData, err := json.Marshal(result)
+	if err != nil {
+		return "", fmt.Errorf("序列化结果失败: %w", err)
+	}
+	return string(jsonData), nil
 }
 
 func (t *WeatherTool) lookupCity(ctx context.Context, city string) (*cityInfo, error) {
@@ -303,30 +346,38 @@ func (t *WeatherTool) lookupCity(ctx context.Context, city string) (*cityInfo, e
 	}, nil
 }
 
-func (t *WeatherTool) getNow(ctx context.Context, locationID string) (string, error) {
+// getNowData 获取实时天气结构化数据
+func (t *WeatherTool) getNowData(ctx context.Context, locationID string) (*NowWeather, error) {
 	u := fmt.Sprintf("https://%s/v7/weather/now?location=%s",
 		t.apiHost, locationID)
 
 	body, err := t.doGet(ctx, u)
 	if err != nil {
-		return "", fmt.Errorf("实时天气查询失败: %w", err)
+		return nil, fmt.Errorf("实时天气查询失败: %w", err)
 	}
 
 	var resp qweatherNowResp
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return "", fmt.Errorf("解析天气数据失败: %w", err)
+		return nil, fmt.Errorf("解析天气数据失败: %w", err)
 	}
 
 	if resp.Code != "200" {
-		return "", fmt.Errorf("天气API错误 code=%s", resp.Code)
+		return nil, fmt.Errorf("天气API错误 code=%s", resp.Code)
 	}
 
 	n := resp.Now
-	return fmt.Sprintf("实时: %s, 温度%s摄氏度, 体感%s摄氏度, %s%s级, 湿度百分之%s",
-		n.Text, n.Temp, n.FeelsLike, n.WindDir, n.WindScale, n.Humidity), nil
+	return &NowWeather{
+		Text:      n.Text,
+		Temp:      n.Temp,
+		FeelsLike: n.FeelsLike,
+		WindDir:   n.WindDir,
+		WindScale: n.WindScale,
+		Humidity:  n.Humidity,
+	}, nil
 }
 
-func (t *WeatherTool) getForecast(ctx context.Context, locationID string, days int) (string, error) {
+// getForecastData 获取天气预报结构化数据
+func (t *WeatherTool) getForecastData(ctx context.Context, locationID string, days int) ([]DayForecast, error) {
 	// 构建预报 API 路径：3d, 7d, 15d
 	daysPath := fmt.Sprintf("%dd", days)
 	u := fmt.Sprintf("https://%s/v7/weather/%s?location=%s",
@@ -334,95 +385,58 @@ func (t *WeatherTool) getForecast(ctx context.Context, locationID string, days i
 
 	body, err := t.doGet(ctx, u)
 	if err != nil {
-		return "", fmt.Errorf("天气预报查询失败: %w", err)
+		return nil, fmt.Errorf("天气预报查询失败: %w", err)
 	}
 
 	var resp qweatherForecastResp
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return "", fmt.Errorf("解析预报数据失败: %w", err)
+		return nil, fmt.Errorf("解析预报数据失败: %w", err)
 	}
 
 	if resp.Code != "200" {
-		return "", fmt.Errorf("预报API错误 code=%s", resp.Code)
+		return nil, fmt.Errorf("预报API错误 code=%s", resp.Code)
 	}
 
 	// 获取今天日期用于计算相对时间
 	today := time.Now().Format("2006-01-02")
-
-	var lines []string
-	for i, d := range resp.Daily {
-		dateStr := formatDateWithRelative(d.FxDate, today, i)
-		lines = append(lines, fmt.Sprintf("%s: %s转%s, %s到%s摄氏度, %s%s级",
-			dateStr, d.TextDay, d.TextNight, d.TempMin, d.TempMax, d.WindDirDay, d.WindScaleDay))
-	}
-	return fmt.Sprintf("%d天预报:\n%s", days, joinLines(lines)), nil
-}
-
-func joinLines(lines []string) string {
-	result := ""
-	for i, l := range lines {
-		if i > 0 {
-			result += "\n"
-		}
-		result += l
-	}
-	return result
-}
-
-// formatDate 将 "2026-03-01" 格式化为 "3月1日"
-func formatDate(dateStr string) string {
-	parts := strings.Split(dateStr, "-")
-	if len(parts) != 3 {
-		return dateStr
-	}
-	month := strings.TrimLeft(parts[1], "0")
-	day := strings.TrimLeft(parts[2], "0")
-	if month == "" {
-		month = "0"
-	}
-	if day == "" {
-		day = "0"
-	}
-	return fmt.Sprintf("%s月%s日", month, day)
-}
-
-// formatDateWithRelative 将日期格式化为带相对时间的格式，如 "今天(3月7日星期六)"
-func formatDateWithRelative(dateStr, today string, index int) string {
-	parts := strings.Split(dateStr, "-")
-	if len(parts) != 3 {
-		return dateStr
-	}
-	month := strings.TrimLeft(parts[1], "0")
-	day := strings.TrimLeft(parts[2], "0")
-	if month == "" {
-		month = "0"
-	}
-	if day == "" {
-		day = "0"
-	}
-
-	// 解析日期获取星期
-	t, err := time.Parse("2006-01-02", dateStr)
-	if err != nil {
-		return fmt.Sprintf("%s月%s日", month, day)
-	}
 	weekdays := []string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}
-	weekday := weekdays[t.Weekday()]
 
-	// 添加相对时间标签
-	var relative string
-	if dateStr == today {
-		relative = "今天"
-	} else if index == 1 {
-		relative = "明天"
-	} else if index == 2 {
-		relative = "后天"
-	}
+	var result []DayForecast
+	for i, d := range resp.Daily {
+		// 解析日期获取星期
+		t, err := time.Parse("2006-01-02", d.FxDate)
+		if err != nil {
+			continue
+		}
 
-	if relative != "" {
-		return fmt.Sprintf("%s(%s月%s日%s)", relative, month, day, weekday)
+		// 计算相对时间标签
+		var relative string
+		if d.FxDate == today {
+			relative = "今天"
+		} else if i == 1 {
+			relative = "明天"
+		} else if i == 2 {
+			relative = "后天"
+		}
+
+		// 格式化日期
+		parts := strings.Split(d.FxDate, "-")
+		month := strings.TrimLeft(parts[1], "0")
+		day := strings.TrimLeft(parts[2], "0")
+
+		result = append(result, DayForecast{
+			Date:      fmt.Sprintf("%s月%s日", month, day),
+			Weekday:   weekdays[t.Weekday()],
+			Relative:  relative,
+			TextDay:   d.TextDay,
+			TextNight: d.TextNight,
+			TempMax:   d.TempMax,
+			TempMin:   d.TempMin,
+			WindDir:   d.WindDirDay,
+			WindScale: d.WindScaleDay,
+		})
 	}
-	return fmt.Sprintf("%s月%s日%s", month, day, weekday)
+	return result, nil
 }
 
 // geoHost 返回 Geo API 的 host。

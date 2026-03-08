@@ -3,6 +3,7 @@ package asr
 import (
 	"fmt"
 	"path/filepath"
+	"sync"
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
 	"github.com/iabetor/pibuddy/internal/logger"
@@ -14,6 +15,7 @@ import (
 type SherpaEngine struct {
 	recognizer *sherpa.OnlineRecognizer
 	stream     *sherpa.OnlineStream
+	mu         sync.Mutex // 保护 stream 的并发访问
 }
 
 // 确保实现 Engine 接口
@@ -92,6 +94,12 @@ func NewSherpaEngine(modelPath string, numThreads int, rule1MinTrailingSilence, 
 // 样本应为 16kHz float32 格式。
 // 注意：Feed 后立即调用 Decode，减少 circular buffer 积压，避免 Overflow 警告。
 func (e *SherpaEngine) Feed(samples []float32) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.stream == nil || e.recognizer == nil {
+		return
+	}
 	e.stream.AcceptWaveform(16000, samples)
 	// 立即解码一帧，减少 buffer 积压
 	if e.recognizer.IsReady(e.stream) {
@@ -101,6 +109,12 @@ func (e *SherpaEngine) Feed(samples []float32) {
 
 // IsEndpoint 返回识别器是否检测到端点（即说话者已结束一句话）。
 func (e *SherpaEngine) IsEndpoint() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.stream == nil || e.recognizer == nil {
+		return false
+	}
 	return e.recognizer.IsEndpoint(e.stream)
 }
 
@@ -108,6 +122,12 @@ func (e *SherpaEngine) IsEndpoint() bool {
 // 循环调用 Decode 直到没有待处理帧，防止 circular buffer 因积压而 Overflow。
 // 如果还没有识别到任何内容，返回空字符串。
 func (e *SherpaEngine) GetResult() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.stream == nil || e.recognizer == nil {
+		return ""
+	}
 	for e.recognizer.IsReady(e.stream) {
 		e.recognizer.Decode(e.stream)
 	}
@@ -120,6 +140,9 @@ func (e *SherpaEngine) GetResult() string {
 // 通过销毁旧 stream 并创建新 stream 来彻底清空内部 circular buffer，
 // 避免长时间运行后 sherpa-onnx circular-buffer Overflow 警告。
 func (e *SherpaEngine) Reset() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	if e.recognizer != nil && e.stream != nil {
 		sherpa.DeleteOnlineStream(e.stream)
 		e.stream = sherpa.NewOnlineStream(e.recognizer)
@@ -134,6 +157,9 @@ func (e *SherpaEngine) Cancel() {
 
 // Close 释放底层 sherpa-onnx 资源。调用后不可再使用此引擎。
 func (e *SherpaEngine) Close() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	if e.stream != nil {
 		sherpa.DeleteOnlineStream(e.stream)
 		e.stream = nil

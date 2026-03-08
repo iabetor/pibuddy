@@ -3,6 +3,8 @@ package llm
 import (
 	"fmt"
 	"time"
+
+	"github.com/iabetor/pibuddy/internal/logger"
 )
 
 // UserPreferences 用户偏好接口，由 voiceprint 包提供实现。
@@ -123,37 +125,47 @@ func (cm *ContextManager) Messages() []Message {
 }
 
 // cleanMessageSequence 清理消息序列。
-// 注意：正常的工具调用流程中，消息会以 tool 结尾，这是正确的！
-// LLM 会基于 tool 结果生成回复。
-// 只有在异常情况下（如程序重启后残留孤立 tool 消息）才需要清理。
+// 正常的工具调用流程中，消息会以 tool 结尾（assistant(tool_calls) + tool(result)），
+// 这是正确的序列，LLM 需要看到 tool 结果才能生成回复，必须保留！
+// 只有孤立的 tool 消息（没有对应的 assistant(tool_calls)）才需要清理。
 func (cm *ContextManager) cleanMessageSequence(messages []Message) []Message {
 	if len(messages) == 0 {
 		return messages
 	}
 
-	// 检查末尾是否是 tool 消息
+	// 末尾不是 tool 消息，无需处理
 	if messages[len(messages)-1].Role != "tool" {
 		return messages
 	}
 
-	// 末尾是 tool，需要清理不完整的工具调用序列
-	// 这通常发生在程序异常退出或消息被错误添加的情况
+	// 末尾是 tool 消息，检查是否有对应的 assistant(tool_calls)
+	// 向前找到所有连续的 tool 消息
+	toolStart := len(messages) - 1
+	for toolStart > 0 && messages[toolStart-1].Role == "tool" {
+		toolStart--
+	}
+
+	// 检查 tool 消息前面是否是 assistant(tool_calls)
+	if toolStart > 0 {
+		prev := messages[toolStart-1]
+		if prev.Role == "assistant" && len(prev.ToolCalls) > 0 {
+			// 这是完整的工具调用序列：assistant(tool_calls) + tool(result)
+			// 保留，LLM 需要看到工具结果来生成回复
+			return messages
+		}
+	}
+
+	// 孤立的 tool 消息（没有对应的 assistant tool_calls），清理掉
 	cleaned := make([]Message, len(messages))
 	copy(cleaned, messages)
 
-	fmt.Printf("[DEBUG] cleanMessageSequence: 检测到末尾是 tool 消息，需要清理孤立序列\n")
+	logger.Debugf("[context] cleanMessageSequence: 清理孤立 tool 消息")
 
-	// 移除末尾所有连续的 tool 消息
 	for len(cleaned) > 0 && cleaned[len(cleaned)-1].Role == "tool" {
 		cleaned = cleaned[:len(cleaned)-1]
 	}
 
-	// 移除对应的 assistant(tool_calls) 消息
-	if len(cleaned) > 0 && cleaned[len(cleaned)-1].Role == "assistant" && len(cleaned[len(cleaned)-1].ToolCalls) > 0 {
-		cleaned = cleaned[:len(cleaned)-1]
-	}
-
-	fmt.Printf("[DEBUG] cleanMessageSequence: %d -> %d 条消息\n", len(messages), len(cleaned))
+	logger.Debugf("[context] cleanMessageSequence: %d -> %d 条消息", len(messages), len(cleaned))
 	return cleaned
 }
 

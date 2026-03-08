@@ -37,6 +37,10 @@ type DialogConfig struct {
 	// 在播放中检测到唤醒词打断时播放，为空则不播放直接进入监听。
 	InterruptReply string `yaml:"interrupt_reply"`
 
+	// ToolReply 工具调用时的等待提示语。
+	// 在执行工具（如查天气、播放音乐）前播放，为空则不播放。
+	ToolReply string `yaml:"tool_reply"`
+
 	// ListenDelay 播放回复语后延迟进入监听的时间（毫秒）。
 	// 给用户一点反应时间再开始监听，默认 500ms。
 	ListenDelay int `yaml:"listen_delay"`
