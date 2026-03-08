@@ -378,6 +378,10 @@ func (sp *StreamPlayer) streamDownload(ctx context.Context, url string, sb *stre
 			return
 		}
 
+		// 添加必要的 headers，避免音乐 CDN 返回 403
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+		req.Header.Set("Referer", "https://y.qq.com/")
+
 		// 断点续传：从已下载的偏移量开始
 		downloaded := sb.Len()
 		if downloaded > 0 {

@@ -62,7 +62,9 @@ func NewSherpaEngine(cfg SherpaConfig) (*SherpaEngine, error) {
 			Debug:      0,
 			Provider:   "cpu",
 		},
-		MaxNumSentences: 1,
+		// 设为较大的值，让 TTS 引擎处理整段文本，避免内部强制断句
+		// 外部的 mergeSentences/splitTextForTTS 会按语义边界分段
+		MaxNumSentences: 10,
 	}
 
 	tts := sherpa_onnx.NewOfflineTts(ttsConfig)

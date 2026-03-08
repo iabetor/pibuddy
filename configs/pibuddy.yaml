@@ -117,8 +117,11 @@ tts:
     model_path: "./models/tts/model.onnx"
     tokens_path: "./models/tts/tokens.txt"
     data_dir: "./models/tts/espeak-ng-data"  # 可选，某些模型需要
-    noise_scale: 0.667
-    length_scale: 1.0
+    # noise_scale: 控制韵律变化，值越大语调越丰富（0.5-1.2，默认0.667）
+    # length_scale: 控制语速，值越小越快（默认1.0）
+    # noise_scale_w: 控制音素变化（默认0.8）
+    noise_scale: 0.9      # 增加韵律变化，让语音更自然有感情
+    length_scale: 1.0     # 正常语速
     speed: 1.0
   piper:
     model_path: "./models/piper/zh_CN-huayan-medium.onnx"
