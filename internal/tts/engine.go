@@ -27,6 +27,11 @@ func PreprocessText(text string) string {
 	// 智能处理 Markdown 表格：转换为口语化句子
 	text = convertTableToSpeech(text)
 
+	// 将温度符号转换为口语化文本（℃/°C → 摄氏度）
+	text = strings.ReplaceAll(text, "℃", "摄氏度")
+	text = strings.ReplaceAll(text, "°C", "摄氏度")
+	text = strings.ReplaceAll(text, "°c", "摄氏度")
+
 	// 删除省略号（中文和英文）
 	text = strings.ReplaceAll(text, "……", "")
 	text = strings.ReplaceAll(text, "...", "")
@@ -196,7 +201,7 @@ func convertTableToSpeech(text string) string {
 // tableRowToSpeech 将表头和数据行组合为口语化句子。
 // 例如：表头 [日期, 星期, 白天, 晚上, 最高温度, 最低温度, 风向, 风力]
 // 数据 [3月9日, 星期一, 多云, 晴, 17℃, 3℃, 东北风, 1-3级]
-// 输出："3月9日星期一，白天多云，晚上晴，最高温度17℃，最低温度3℃，东北风1-3级"
+// 输出："3月9日星期一，白天多云，晚上晴，最高温度17摄氏度，最低温度3摄氏度，东北风1-3级"
 func tableRowToSpeech(headers, cells []string) string {
 	if len(cells) == 0 {
 		return ""

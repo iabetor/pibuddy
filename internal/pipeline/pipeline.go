@@ -1037,6 +1037,8 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 			replyText := strings.TrimSpace(fullReply.String())
 			if replyText != "" && !p.interrupted.Load() {
 				p.state.Transition(StateSpeaking)
+				// 先预处理文本（表格转口语等），再按句子分段，避免表格被逐行拆碎
+				replyText = tts.PreprocessText(replyText)
 				// 合并短句为大段（每段最多 100 个字符），减少 TTS 次数
 				chunks := mergeSentences(replyText, 100)
 				for _, chunk := range chunks {
