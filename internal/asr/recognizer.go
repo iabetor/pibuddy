@@ -126,6 +126,12 @@ func (e *SherpaEngine) Reset() {
 	}
 }
 
+// Cancel 取消正在进行的识别。
+// Sherpa 是离线引擎，直接 Reset 清空状态即可。
+func (e *SherpaEngine) Cancel() {
+	e.Reset()
+}
+
 // Close 释放底层 sherpa-onnx 资源。调用后不可再使用此引擎。
 func (e *SherpaEngine) Close() {
 	if e.stream != nil {

@@ -15,13 +15,10 @@ vad:
   min_silence_ms: 6000  # 静音 6 秒视为说话结束（平衡响应速度和停顿容忍）
 
 asr:
-  # 引擎优先级列表，按顺序尝试，额度用完自动切换到下一个
-  # 可选值：tencent-rt（腾讯云实时）、tencent-flash（腾讯云一句话）、sherpa（离线）
-  # sherpa 始终作为最终兜底，即使未列出也会自动添加
+  # 引擎优先级列表，按顺序尝试
+  # 当前只用 sherpa 离线引擎（完全离线，无限制）
   priority:
-    - "tencent-rt"      # 腾讯云实时语音识别（5小时/月免费，流式模式）
-    - "tencent-flash"   # 腾讯云一句话识别（5000次/月免费，批处理模式）
-    - "sherpa"          # sherpa-onnx 离线引擎（无限制）
+    - "sherpa"
   # 离线引擎配置（sherpa-onnx）
   model_path: "./models/asr"
   num_threads: 4  # 增加解码线程数，加速 decode，减少 buffer 积压
@@ -96,15 +93,16 @@ llm:
     - 门锁开锁：必须用户明确要求才能执行，需要 confirm=true
     - 音乐播放：直接调用 play_music，不列搜索结果
     - 声纹查询：调用 whoami 或 list_voiceprint_users
-    - 休息命令："休息吧""不用了"等调用 go_to_sleep
+    - 休息命令：\"休息吧\"\"不用了\"等调用 go_to_sleep
+    - 天气预报：用口语化方式回复，如"明天北京晴天，0到11度，有点凉，多穿点"，不要列清单
 
     闲聊讲故事可多说几句，日常问答务必精简。
   max_history: 10
   max_tokens: 500
 
 tts:
-  engine: "tencent"
-  fallback: "say"  # 回退引擎，macOS 使用 say 命令，Linux 使用 piper
+  engine: "sherpa"   # tencent, edge, sherpa, piper, say
+  fallback: "edge"   # 回退引擎
   tencent:
     secret_id: "${PIBUDDY_TENCENT_SECRET_ID}"
     secret_key: "${PIBUDDY_TENCENT_SECRET_KEY}"
@@ -113,6 +111,14 @@ tts:
     speed: 0
   edge:
     voice: "zh-CN-XiaoxiaoNeural"
+  sherpa:
+    # 中文 VITS 模型 - 从 https://github.com/k2-fsa/sherpa-onnx/releases 下载
+    model_path: "./models/tts/model.onnx"
+    tokens_path: "./models/tts/tokens.txt"
+    data_dir: "./models/tts/espeak-ng-data"  # 可选，某些模型需要
+    noise_scale: 0.667
+    length_scale: 1.0
+    speed: 1.0
   piper:
     model_path: "./models/piper/zh_CN-huayan-medium.onnx"
   say:
@@ -127,7 +133,7 @@ log:
 
 dialog:
   continuous_timeout: 10  # 连续对话超时（秒），回复后等待用户继续说话的时间
-  wake_reply: "我在，请问有什么可以帮助您的？"  # 唤醒回复语，为空则不播放
+  wake_reply: "我在"  # 唤醒回复语，为空则不播放
   interrupt_reply: "我在"  # 打断播放时的回复语，区别于唤醒回复
   listen_delay: 300  # 播放回复语后延迟进入监听的时间（毫秒），给用户反应时间
 

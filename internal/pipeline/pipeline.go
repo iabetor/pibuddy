@@ -205,6 +205,19 @@ func New(cfg *config.Config) (*Pipeline, error) {
 		}
 	case "edge":
 		p.ttsEngine = tts.NewEdgeEngine(cfg.TTS.Edge.Voice)
+	case "sherpa":
+		p.ttsEngine, err = tts.NewSherpaEngine(tts.SherpaConfig{
+			ModelPath:   cfg.TTS.Sherpa.ModelPath,
+			TokensPath:  cfg.TTS.Sherpa.TokensPath,
+			DataDir:     cfg.TTS.Sherpa.DataDir,
+			NoiseScale:  cfg.TTS.Sherpa.NoiseScale,
+			LengthScale: cfg.TTS.Sherpa.LengthScale,
+			Speed:       cfg.TTS.Sherpa.Speed,
+		})
+		if err != nil {
+			p.Close()
+			return nil, fmt.Errorf("初始化 Sherpa TTS 失败: %w", err)
+		}
 	case "piper":
 		p.ttsEngine = tts.NewPiperEngine(cfg.TTS.Piper.ModelPath)
 	case "say":
@@ -225,6 +238,18 @@ func New(cfg *config.Config) (*Pipeline, error) {
 		case "edge":
 			p.fallbackTtsEngine = tts.NewEdgeEngine(cfg.TTS.Edge.Voice)
 			logger.Info("[pipeline] 已启用 TTS 回退引擎: edge")
+		case "sherpa":
+			p.fallbackTtsEngine, err = tts.NewSherpaEngine(tts.SherpaConfig{
+				ModelPath:   cfg.TTS.Sherpa.ModelPath,
+				TokensPath:  cfg.TTS.Sherpa.TokensPath,
+				DataDir:     cfg.TTS.Sherpa.DataDir,
+				NoiseScale:  cfg.TTS.Sherpa.NoiseScale,
+				LengthScale: cfg.TTS.Sherpa.LengthScale,
+				Speed:       cfg.TTS.Sherpa.Speed,
+			})
+			if err == nil {
+				logger.Info("[pipeline] 已启用 TTS 回退引擎: sherpa")
+			}
 		case "say":
 			p.fallbackTtsEngine = tts.NewSayEngine(cfg.TTS.Say.Voice)
 			logger.Info("[pipeline] 已启用 TTS 回退引擎: say (macOS)")
@@ -1069,20 +1094,14 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 				toolResult = fmt.Sprintf("工具执行失败: %v", err)
 			}
 
-			// 先添加工具结果到上下文（LLM 要求每个 tool_call 都有对应的 tool 消息）
-			p.contextManager.AddMessage(llm.Message{
-				Role:       "tool",
-				Content:    toolResult,
-				ToolCallID: tc.ID,
-				Name:       tc.Function.Name,
-			})
-
+			// 检查是否是需要跳过 LLM 的工具结果（这些情况不添加 tool 消息，直接处理）
 			// 检查是否是音乐播放结果
 			if tc.Function.Name == "play_music" || tc.Function.Name == "next_music" || tc.Function.Name == "resume_music" {
 				var musicResult tools.MusicResult
 				if jsonErr := json.Unmarshal([]byte(toolResult), &musicResult); jsonErr == nil {
 					if musicResult.Success && (musicResult.URL != "" || musicResult.CacheKey != "") {
-						// 播放音乐
+						// 播放音乐（移除已添加的 assistant(tool_calls) 消息，不添加 tool 消息）
+						p.contextManager.RemoveLastMessages(1)
 						logger.Infof("[pipeline] 开始播放音乐: %s - %s", musicResult.Artist, musicResult.SongName)
 						p.playMusicFromPosition(ctx, musicResult.URL, musicResult.CacheKey, musicResult.PositionSec)
 						// 音乐播放结束后继续
@@ -1096,7 +1115,8 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 				var storyResult tools.StoryResult
 				if jsonErr := json.Unmarshal([]byte(toolResult), &storyResult); jsonErr == nil {
 					if storyResult.SkipLLM && storyResult.Success && storyResult.Content != "" {
-						// 直接送 TTS，跳过 LLM
+						// 直接送 TTS，跳过 LLM（移除已添加的 assistant(tool_calls) 消息，不添加 tool 消息）
+						p.contextManager.RemoveLastMessages(1)
 						logger.Infof("[pipeline] 直接朗读故事（跳过LLM）: %s", storyResult.Title)
 						p.state.Transition(StateSpeaking)
 						p.speakText(queryCtx, storyResult.Content) // 使用 queryCtx 以支持打断
@@ -1121,12 +1141,22 @@ func (p *Pipeline) processQuery(ctx context.Context, query string) {
 						logger.Info("[pipeline] 用户说休息，停止监听")
 						// 停止连续对话计时器
 						p.stopContinuousTimer()
+						// 移除已添加的 assistant(tool_calls) 消息
+						p.contextManager.RemoveLastMessages(1)
 						// 直接回到空闲状态
 						p.state.ForceIdle()
 						return
 					}
 				}
 			}
+
+			// 其他情况：添加工具结果到上下文，让 LLM 生成回复
+			p.contextManager.AddMessage(llm.Message{
+				Role:       "tool",
+				Content:    toolResult,
+				ToolCallID: tc.ID,
+				Name:       tc.Function.Name,
+			})
 		}
 		// 继续下一轮 LLM 调用
 	}
@@ -1342,6 +1372,9 @@ func (p *Pipeline) speakTextWithFallback(ctx context.Context, text string) {
 
 // speakTextWithFallbackAndReturn 使用主 TTS 引擎合成并播放文本，返回错误信息。
 func (p *Pipeline) speakTextWithFallbackAndReturn(ctx context.Context, text string) error {
+	// 预处理文本：删除 Markdown 格式等不适合朗读的内容
+	text = tts.PreprocessText(text)
+	
 	samples, sampleRate, err := p.ttsEngine.Synthesize(ctx, text)
 	if err != nil {
 		logger.Errorf("[pipeline] TTS 合成失败: %v", err)
@@ -1850,6 +1883,26 @@ func initASREngine(cfg *config.Config) (asr.Engine, error) {
 	// 如果没有可用引擎，返回错误
 	if len(engines) == 0 {
 		return nil, fmt.Errorf("没有可用的 ASR 引擎，请检查配置")
+	}
+
+	// 确保 sherpa 在列表末尾（作为端点检测引擎）
+	// 因为 FallbackEngine 使用最后一个引擎做端点检测，
+	// 而 tencent-flash/tencent-rt 不支持实时端点检测
+	sherpaIdx := -1
+	for i, t := range engineTypes {
+		if t == asr.EngineSherpa {
+			sherpaIdx = i
+			break
+		}
+	}
+	if sherpaIdx >= 0 && sherpaIdx != len(engines)-1 {
+		// 把 sherpa 移到末尾
+		sherpaEngine := engines[sherpaIdx]
+		engines = append(engines[:sherpaIdx], engines[sherpaIdx+1:]...)
+		engines = append(engines, sherpaEngine)
+		engineTypes = append(engineTypes[:sherpaIdx], engineTypes[sherpaIdx+1:]...)
+		engineTypes = append(engineTypes, asr.EngineSherpa)
+		logger.Info("[pipeline] 已将 Sherpa 引擎移至末尾用于端点检测")
 	}
 
 	// 如果只有一个引擎，直接返回

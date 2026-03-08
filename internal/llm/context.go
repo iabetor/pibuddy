@@ -110,38 +110,8 @@ func (cm *ContextManager) Messages() []Message {
 		}
 	}
 
-	// 清理末尾的孤立 tool 消息（没有对应 assistant 回复的）
-	// 这在工具调用被打断时可能发生
-	messages := cm.messages
-
-	// 收集末尾所有连续的 tool 消息的 tool_call_id
-	trailingToolCallIDs := make(map[string]bool)
-	for len(messages) > 0 && messages[len(messages)-1].Role == "tool" {
-		tcID := messages[len(messages)-1].ToolCallID
-		if tcID != "" {
-			trailingToolCallIDs[tcID] = true
-		}
-		messages = messages[:len(messages)-1]
-	}
-
-	// 如果有孤立的 tool 消息，找到并移除包含这些 tool_call 的 assistant 消息
-	if len(trailingToolCallIDs) > 0 && len(messages) > 0 && messages[len(messages)-1].Role == "assistant" {
-		// 检查 assistant 消息是否包含这些 tool_call_id
-		assistantMsg := messages[len(messages)-1]
-		if len(assistantMsg.ToolCalls) > 0 {
-			// 检查是否所有 tool_calls 都在孤立列表中
-			allOrphaned := true
-			for _, tc := range assistantMsg.ToolCalls {
-				if !trailingToolCallIDs[tc.ID] {
-					allOrphaned = false
-					break
-				}
-			}
-			if allOrphaned {
-				messages = messages[:len(messages)-1]
-			}
-		}
-	}
+	// 清理消息序列，确保格式正确
+	messages := cm.cleanMessageSequence(cm.messages)
 
 	msgs := make([]Message, 0, 1+len(messages))
 	msgs = append(msgs, Message{
@@ -150,6 +120,50 @@ func (cm *ContextManager) Messages() []Message {
 	})
 	msgs = append(msgs, messages...)
 	return msgs
+}
+
+// cleanMessageSequence 清理消息序列。
+// 注意：正常的工具调用流程中，消息会以 tool 结尾，这是正确的！
+// LLM 会基于 tool 结果生成回复。
+// 只有在异常情况下（如程序重启后残留孤立 tool 消息）才需要清理。
+func (cm *ContextManager) cleanMessageSequence(messages []Message) []Message {
+	if len(messages) == 0 {
+		return messages
+	}
+
+	// 检查末尾是否是 tool 消息
+	if messages[len(messages)-1].Role != "tool" {
+		return messages
+	}
+
+	// 末尾是 tool，需要清理不完整的工具调用序列
+	// 这通常发生在程序异常退出或消息被错误添加的情况
+	cleaned := make([]Message, len(messages))
+	copy(cleaned, messages)
+
+	fmt.Printf("[DEBUG] cleanMessageSequence: 检测到末尾是 tool 消息，需要清理孤立序列\n")
+
+	// 移除末尾所有连续的 tool 消息
+	for len(cleaned) > 0 && cleaned[len(cleaned)-1].Role == "tool" {
+		cleaned = cleaned[:len(cleaned)-1]
+	}
+
+	// 移除对应的 assistant(tool_calls) 消息
+	if len(cleaned) > 0 && cleaned[len(cleaned)-1].Role == "assistant" && len(cleaned[len(cleaned)-1].ToolCalls) > 0 {
+		cleaned = cleaned[:len(cleaned)-1]
+	}
+
+	fmt.Printf("[DEBUG] cleanMessageSequence: %d -> %d 条消息\n", len(messages), len(cleaned))
+	return cleaned
+}
+
+// RemoveLastMessages 移除最后 n 条消息。
+// 用于在工具调用后直接返回时清理不完整的消息序列。
+func (cm *ContextManager) RemoveLastMessages(n int) {
+	if n <= 0 || n > len(cm.messages) {
+		return
+	}
+	cm.messages = cm.messages[:len(cm.messages)-n]
 }
 
 // Clear 清空对话历史。

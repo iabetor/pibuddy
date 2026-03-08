@@ -133,12 +133,13 @@ type LLMConfig struct {
 
 // TTSConfig 语音合成配置。
 type TTSConfig struct {
-	Engine        string        `yaml:"engine"`
-	Fallback      string        `yaml:"fallback"` // 回退引擎，当主引擎失败时使用（如 "piper"、"say"）
-	Edge          EdgeConfig    `yaml:"edge"`
-	Piper         PiperConfig   `yaml:"piper"`
-	Say           SayConfig     `yaml:"say"`
-	Tencent       TencentConfig `yaml:"tencent"`
+	Engine   string        `yaml:"engine"`
+	Fallback string        `yaml:"fallback"` // 回退引擎，当主引擎失败时使用（如 "piper"、"say"）
+	Edge     EdgeConfig    `yaml:"edge"`
+	Piper    PiperConfig   `yaml:"piper"`
+	Say      SayConfig     `yaml:"say"`
+	Sherpa   SherpaConfig  `yaml:"sherpa"`
+	Tencent  TencentConfig `yaml:"tencent"`
 }
 
 // TencentConfig 腾讯云 TTS 配置。
@@ -158,6 +159,16 @@ type EdgeConfig struct {
 // PiperConfig Piper TTS 配置。
 type PiperConfig struct {
 	ModelPath string `yaml:"model_path"`
+}
+
+// SherpaConfig Sherpa-onnx TTS 配置。
+type SherpaConfig struct {
+	ModelPath   string  `yaml:"model_path"`
+	TokensPath  string  `yaml:"tokens_path"`
+	DataDir     string  `yaml:"data_dir"`
+	NoiseScale  float32 `yaml:"noise_scale"`
+	LengthScale float32 `yaml:"length_scale"`
+	Speed       float32 `yaml:"speed"`
 }
 
 // SayConfig macOS say TTS 配置。
